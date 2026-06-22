@@ -1,4 +1,6 @@
-const VERSION = "0.1.3";
+import { parse as babelParse } from "@babel/parser";
+
+const VERSION = "0.2.0";
 const MCP_PROTOCOL_VERSION = "2025-03-26";
 const DEFAULT_LINES_PER_REF = 80;
 const DEFAULT_GITHUB_REF = "main";
@@ -166,6 +168,7 @@ async function callMcpTool(name, args, env) {
   if (name === "cairnstone_expand") return expandRefFromBody(args, env);
   if (name === "cairnstone_get_stone") return getStone(env, requiredString(args.hash, "hash"));
   if (name === "cairnstone_get_lod") return getLod(env, requiredString(args.hash, "hash"), requiredString(args.level, "level"));
+  if (name === "cairnstone_lint_stone") return lintStoneFromBody(args, env);
   return { ok: false, error: "unknown_tool", name };
 }
 
@@ -301,6 +304,18 @@ function mcpTools() {
         properties: {
           hash: { type: "string" },
           level: { type: "string", enum: ["lod1", "lod2", "lod3", "lod4", "lod5"] }
+        }
+      }
+    },
+    {
+      name: "cairnstone_lint_stone",
+      description: "Phase 2: real AST-based syntax check against the stone's full original content (JS/TS/JSX/TSX only). Catches real parse errors (not heuristic flags) and maps each error's line number to the ref_id covering it, so you know exactly which chunk to expand.",
+      inputSchema: {
+        type: "object",
+        required: ["stone_hash"],
+        properties: {
+          stone_hash: { type: "string" },
+          language: { type: "string", enum: ["javascript", "typescript", "jsx", "tsx"], description: "Override auto-detection from file extension." }
         }
       }
     }
@@ -599,6 +614,68 @@ async function getLod(env, hash, level) {
   const value = result.stone.layers[level];
   if (value === undefined) return { ok: false, error: "lod_not_found", hash, level };
   return { ok: true, hash, level, value };
+}
+
+function pluginsForLanguage(language) {
+  if (language === "typescript") return ["typescript", "topLevelAwait"];
+  if (language === "tsx") return ["typescript", "jsx", "topLevelAwait"];
+  if (language === "jsx") return ["jsx", "topLevelAwait"];
+  if (language === "javascript") return ["jsx", "topLevelAwait"];
+  return null;
+}
+
+function pluginsForPath(path) {
+  const ext = String(path || "").split(".").pop().toLowerCase();
+  if (ext === "tsx") return pluginsForLanguage("tsx");
+  if (ext === "ts") return pluginsForLanguage("typescript");
+  if (ext === "jsx") return pluginsForLanguage("jsx");
+  if (["js", "mjs", "cjs"].includes(ext)) return pluginsForLanguage("javascript");
+  return null;
+}
+
+async function lintStoneFromBody(body, env) {
+  requireBindings(env);
+  const hash = requiredString(body.stone_hash, "stone_hash");
+  const result = await getStone(env, hash);
+  if (!result.ok) return result;
+  const stone = result.stone;
+  const path = stone.metadata?.github?.path || stone.border?.path || "content.txt";
+
+  const plugins = body.language ? pluginsForLanguage(body.language) : pluginsForPath(path);
+  if (!plugins) {
+    return { ok: true, stone_hash: hash, path, supported: false, note: "Unsupported language for Phase 2 syntax linting (javascript/typescript/jsx/tsx only)." };
+  }
+
+  const rawKey = stone.layers?.lod1?.raw_key;
+  if (!rawKey) return { ok: false, error: "raw_not_available" };
+  const raw = await env.CAIRNSTONE_RAW.get(rawKey);
+  if (!raw) return { ok: false, error: "raw_not_found", raw_key: rawKey };
+  const content = await raw.text();
+
+  let valid = true;
+  let errors = [];
+  try {
+    const ast = babelParse(content, { sourceType: "unambiguous", errorRecovery: true, plugins });
+    if (ast.errors && ast.errors.length) {
+      valid = false;
+      errors = ast.errors.map(e => ({ message: e.message, line: e.loc ? e.loc.line : null, column: e.loc ? e.loc.column : null, code: e.code || null, reason_code: e.reasonCode || null }));
+    }
+  } catch (e) {
+    valid = false;
+    errors = [{ message: e.message, line: e.loc ? e.loc.line : null, column: e.loc ? e.loc.column : null, code: e.code || null, reason_code: e.reasonCode || null }];
+  }
+
+  if (!valid) {
+    for (const err of errors) {
+      if (!err.line) continue;
+      const row = await env.CAIRNSTONE_DB.prepare(
+        "SELECT ref_id FROM refs WHERE stone_hash = ? AND line_start <= ? AND line_end >= ? LIMIT 1"
+      ).bind(hash, err.line, err.line).first();
+      err.ref_id = row ? row.ref_id : null;
+    }
+  }
+
+  return { ok: true, stone_hash: hash, path, supported: true, valid, error_count: errors.length, errors };
 }
 
 async function searchStonesFromBody(body, env) {

@@ -1,6 +1,8 @@
-const VERSION = "0.1.0";
+const VERSION = "0.1.1";
 const MCP_PROTOCOL_VERSION = "2025-03-26";
 const DEFAULT_LINES_PER_REF = 80;
+const DEFAULT_GITHUB_REF = "main";
+const MAX_FETCH_BYTES = 900000;
 
 export default {
   async fetch(request, env) {
@@ -11,6 +13,8 @@ export default {
       if (request.method === "GET" && url.pathname === "/") return json(landing(env, url));
       if (request.method === "GET" && url.pathname === "/health") return json(health(env));
       if (request.method === "POST" && url.pathname === "/v1/stones") return json(await createStoneFromBody(await request.json(), env));
+      if (request.method === "POST" && url.pathname === "/v1/stones/github") return json(await createStoneFromGitHubBody(await request.json(), env));
+      if (request.method === "POST" && url.pathname === "/v1/fetch/github") return json(await fetchGitHubFileFromBody(await request.json(), env));
       if (request.method === "POST" && url.pathname === "/v1/search") return json(await searchStonesFromBody(await request.json(), env));
       if (request.method === "POST" && url.pathname === "/v1/expand") return json(await expandRefFromBody(await request.json(), env));
 
@@ -34,11 +38,12 @@ function landing(env, url) {
     version: VERSION,
     protocol: "FSL-CCR Stone v5",
     mcp: `${url.origin}/mcp`,
-    message: "CairnStone v5 is live. Claude and other MCP clients should connect to /mcp. REST clients can use /health, /v1/stones, /v1/search, and /v1/expand.",
+    message: "CairnStone v5 is live. Claude and other MCP clients should connect to /mcp. REST clients can use /health, /v1/stones, /v1/stones/github, /v1/search, and /v1/expand.",
     base_url: url.origin,
     health: `${url.origin}/health`,
     d1: Boolean(env.CAIRNSTONE_DB),
     r2: Boolean(env.CAIRNSTONE_RAW),
+    github_token_available: Boolean(env.GITHUB_TOKEN),
     endpoints: routes(),
     mcp_tools: mcpTools().map(tool => tool.name)
   };
@@ -53,6 +58,7 @@ function health(env) {
     mcp_protocol_version: MCP_PROTOCOL_VERSION,
     d1: Boolean(env.CAIRNSTONE_DB),
     r2: Boolean(env.CAIRNSTONE_RAW),
+    github_token_available: Boolean(env.GITHUB_TOKEN),
     endpoints: routes(),
     mcp_tools: mcpTools().map(tool => tool.name)
   };
@@ -65,6 +71,8 @@ function routes() {
     "POST /mcp",
     "GET /mcp",
     "POST /v1/stones",
+    "POST /v1/stones/github",
+    "POST /v1/fetch/github",
     "GET /v1/stones/:hash",
     "GET /v1/stones/:hash/lod/:level",
     "POST /v1/search",
@@ -85,9 +93,7 @@ async function handleMcp(request, env, url) {
     });
   }
 
-  if (request.method !== "POST") {
-    return json({ ok: false, error: "method_not_allowed" }, 405);
-  }
+  if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
 
   let rpc;
   try {
@@ -125,17 +131,9 @@ async function handleMcpRpc(rpc, env) {
       });
     }
 
-    if (method === "notifications/initialized") {
-      return null;
-    }
-
-    if (method === "ping") {
-      return rpcResult(id, {});
-    }
-
-    if (method === "tools/list") {
-      return rpcResult(id, { tools: mcpTools() });
-    }
+    if (method === "notifications/initialized") return null;
+    if (method === "ping") return rpcResult(id, {});
+    if (method === "tools/list") return rpcResult(id, { tools: mcpTools() });
 
     if (method === "tools/call") {
       const name = requiredString(params.name, "name");
@@ -155,7 +153,9 @@ async function handleMcpRpc(rpc, env) {
 
 async function callMcpTool(name, args, env) {
   if (name === "cairnstone_health") return health(env);
+  if (name === "cairnstone_fetch_github_file") return fetchGitHubFileFromBody(args, env);
   if (name === "cairnstone_create_stone") return createStoneFromBody(args, env);
+  if (name === "cairnstone_create_github_file_stone") return createStoneFromGitHubBody(args, env);
   if (name === "cairnstone_search") return searchStonesFromBody(args, env);
   if (name === "cairnstone_expand") return expandRefFromBody(args, env);
   if (name === "cairnstone_get_stone") return getStone(env, requiredString(args.hash, "hash"));
@@ -167,22 +167,60 @@ function mcpTools() {
   return [
     {
       name: "cairnstone_health",
-      description: "Check CairnStone v5 MCP, D1, and R2 status.",
+      description: "Check CairnStone v5 MCP, D1, R2, and GitHub fetch status.",
       inputSchema: { type: "object", properties: {}, additionalProperties: false }
     },
     {
-      name: "cairnstone_create_stone",
-      description: "Create a CairnStone from raw text content. Stores raw content in R2, creates searchable refs in D1, and returns LOD layers plus a compression receipt.",
+      name: "cairnstone_fetch_github_file",
+      description: "Server-side fetch a GitHub file by owner, repo, path, and ref. This verifies fetch mode without pasting raw content into the tool call.",
       inputSchema: {
         type: "object",
-        required: ["title", "author", "content"],
+        required: ["owner", "repo", "path"],
+        properties: {
+          owner: { type: "string" },
+          repo: { type: "string" },
+          path: { type: "string" },
+          ref: { type: "string", description: "Branch, tag, or commit SHA. Defaults to main." },
+          max_bytes: { type: "number", minimum: 1, maximum: MAX_FETCH_BYTES },
+          return_content: { type: "boolean", description: "Return raw text content. Defaults to false for safety." }
+        }
+      }
+    },
+    {
+      name: "cairnstone_create_stone",
+      description: "Create a CairnStone from either inline content or server-side GitHub fetch input. For scale, pass owner, repo, path, and ref instead of content.",
+      inputSchema: {
+        type: "object",
+        required: ["title", "author"],
         properties: {
           title: { type: "string" },
           author: { type: "string" },
           content: { type: "string" },
-          path: { type: "string" },
+          owner: { type: "string" },
           repo: { type: "string" },
+          path: { type: "string" },
+          ref: { type: "string" },
           commit: { type: "string" },
+          parent: { type: "string" },
+          chain: { type: "string" },
+          related: { type: "array", items: { type: "string" } },
+          metadata: { type: "object" }
+        }
+      }
+    },
+    {
+      name: "cairnstone_create_github_file_stone",
+      description: "Create a CairnStone by having the Worker fetch a GitHub file server-side using owner, repo, path, and optional ref. This removes the large-content paste bottleneck.",
+      inputSchema: {
+        type: "object",
+        required: ["owner", "repo", "path", "author"],
+        properties: {
+          owner: { type: "string" },
+          repo: { type: "string" },
+          path: { type: "string" },
+          ref: { type: "string" },
+          title: { type: "string" },
+          author: { type: "string" },
           parent: { type: "string" },
           chain: { type: "string" },
           related: { type: "array", items: { type: "string" } },
@@ -237,18 +275,41 @@ function mcpTools() {
   ];
 }
 
+async function createStoneFromGitHubBody(body, env) {
+  const fetched = await fetchGitHubFileFromBody({ ...body, return_content: true }, env);
+  if (!fetched.ok) return fetched;
+  const title = body.title || `${fetched.github.owner}/${fetched.github.repo}/${fetched.github.path}@${fetched.github.ref}`;
+  const stoneBody = {
+    ...body,
+    title,
+    content: fetched.content,
+    path: fetched.github.path,
+    repo: `${fetched.github.owner}/${fetched.github.repo}`,
+    commit: fetched.github.ref,
+    metadata: {
+      ...(isObject(body.metadata) ? body.metadata : {}),
+      source_type: "github_file",
+      github: fetched.github,
+      fetch: fetched.fetch
+    }
+  };
+  return createStoneFromBody(stoneBody, env);
+}
+
 async function createStoneFromBody(body, env) {
+  const normalized = await normalizeStoneInput(body, env);
   requireBindings(env);
-  const content = requiredString(body.content, "content");
-  const title = requiredString(body.title, "title");
-  const author = requiredString(body.author, "author");
+
+  const content = normalized.content;
+  const title = normalized.title;
+  const author = normalized.author;
   const created = new Date().toISOString();
-  const path = body.path || "content.txt";
-  const repo = body.repo || null;
-  const commit = body.commit || null;
+  const path = normalized.path || "content.txt";
+  const repo = normalized.repo || null;
+  const commit = normalized.commit || null;
   const parent = body.parent || null;
   const chain = body.chain || null;
-  const metadata = isObject(body.metadata) ? body.metadata : {};
+  const metadata = isObject(normalized.metadata) ? normalized.metadata : {};
 
   const rawHash = await sha256(content);
   const rawKey = `raw/${rawHash}.txt`;
@@ -284,7 +345,166 @@ async function createStoneFromBody(body, env) {
     "INSERT INTO receipts (id,stone_hash,original_bytes,compressed_bytes,ratio,strategy,created_at) VALUES (?,?,?,?,?,?,?)"
   ).bind(receiptId, stoneHash, receipt.original_bytes, receipt.compressed_bytes, receipt.ratio, receipt.strategy, created).run();
 
-  return { ok: true, stone_hash: stoneHash, raw_key: rawKey, refs: refs.length, receipt, stone };
+  return { ok: true, stone_hash: stoneHash, raw_key: rawKey, refs: refs.length, receipt, source: normalized.source, stone };
+}
+
+async function normalizeStoneInput(body, env) {
+  const title = body.title || null;
+  const author = requiredString(body.author, "author");
+
+  if (typeof body.content === "string" && body.content.length > 0) {
+    return {
+      source: { type: "inline" },
+      content: body.content,
+      title: title || "Inline CairnStone",
+      author,
+      path: body.path || "content.txt",
+      repo: body.repo || null,
+      commit: body.commit || null,
+      metadata: isObject(body.metadata) ? body.metadata : {}
+    };
+  }
+
+  const githubSpec = githubSpecFromBody(body);
+  if (githubSpec) {
+    const fetched = await fetchGitHubFile({ ...githubSpec, returnContent: true }, env);
+    return {
+      source: { type: "github_file", github: fetched.github, fetch: fetched.fetch },
+      content: fetched.content,
+      title: title || `${fetched.github.owner}/${fetched.github.repo}/${fetched.github.path}@${fetched.github.ref}`,
+      author,
+      path: fetched.github.path,
+      repo: `${fetched.github.owner}/${fetched.github.repo}`,
+      commit: fetched.github.ref,
+      metadata: {
+        ...(isObject(body.metadata) ? body.metadata : {}),
+        source_type: "github_file",
+        github: fetched.github,
+        fetch: fetched.fetch
+      }
+    };
+  }
+
+  throw new Error("Missing content or GitHub source. Pass content, or pass owner+repo+path+optional ref.");
+}
+
+async function fetchGitHubFileFromBody(body, env) {
+  const spec = githubSpecFromBody(body);
+  if (!spec) throw new Error("Missing GitHub source. Required: owner, repo, path. Optional: ref, max_bytes, return_content.");
+  return fetchGitHubFile({ ...spec, returnContent: Boolean(body.return_content) }, env);
+}
+
+function githubSpecFromBody(body) {
+  if (!isObject(body)) return null;
+  if (isObject(body.github)) {
+    const owner = body.github.owner || body.github.org;
+    const repo = body.github.repo || body.github.repository;
+    const path = body.github.path || body.github.file_path;
+    if (owner && repo && path) {
+      return {
+        owner: String(owner),
+        repo: String(repo),
+        path: String(path),
+        ref: String(body.github.ref || body.github.branch || body.github.sha || body.ref || DEFAULT_GITHUB_REF),
+        maxBytes: clamp(Number(body.github.max_bytes || body.max_bytes || MAX_FETCH_BYTES), 1, MAX_FETCH_BYTES)
+      };
+    }
+  }
+
+  const owner = body.owner || body.org;
+  const repo = body.repo || body.repository;
+  const path = body.path || body.file_path;
+  if (!owner || !repo || !path) return null;
+  return {
+    owner: String(owner),
+    repo: String(repo),
+    path: String(path),
+    ref: String(body.ref || body.branch || body.sha || DEFAULT_GITHUB_REF),
+    maxBytes: clamp(Number(body.max_bytes || MAX_FETCH_BYTES), 1, MAX_FETCH_BYTES)
+  };
+}
+
+async function fetchGitHubFile(spec, env) {
+  const owner = safeGitHubPart(spec.owner, "owner");
+  const repo = safeGitHubPart(spec.repo, "repo");
+  const ref = safeGitHubRef(spec.ref || DEFAULT_GITHUB_REF);
+  const path = safeGitHubPath(spec.path);
+  const maxBytes = clamp(Number(spec.maxBytes || MAX_FETCH_BYTES), 1, MAX_FETCH_BYTES);
+  const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${encodeURIComponent(ref)}/${path.split("/").map(encodeURIComponent).join("/")}`;
+  const headers = {
+    "User-Agent": "cairnstone-v5-worker",
+    "Accept": "text/plain, application/octet-stream;q=0.9, */*;q=0.8"
+  };
+  if (env.GITHUB_TOKEN) headers.Authorization = `Bearer ${env.GITHUB_TOKEN}`;
+
+  const response = await fetch(rawUrl, { headers });
+  if (!response.ok) {
+    return {
+      ok: false,
+      error: "github_fetch_failed",
+      status: response.status,
+      status_text: response.statusText,
+      github: { owner, repo, path, ref },
+      hint: response.status === 404 && !env.GITHUB_TOKEN ? "If this is a private repo, add GITHUB_TOKEN as a Worker secret." : undefined
+    };
+  }
+
+  const contentLength = Number(response.headers.get("content-length") || 0);
+  if (contentLength && contentLength > maxBytes) {
+    return {
+      ok: false,
+      error: "github_file_too_large",
+      max_bytes: maxBytes,
+      content_length: contentLength,
+      github: { owner, repo, path, ref }
+    };
+  }
+
+  const text = await response.text();
+  const bytes = utf8Bytes(text);
+  if (bytes > maxBytes) {
+    return {
+      ok: false,
+      error: "github_file_too_large_after_read",
+      max_bytes: maxBytes,
+      bytes,
+      github: { owner, repo, path, ref }
+    };
+  }
+
+  const sha = await sha256(text);
+  const result = {
+    ok: true,
+    github: { owner, repo, path, ref, raw_url: rawUrl },
+    fetch: {
+      bytes,
+      sha256: sha,
+      content_type: response.headers.get("content-type"),
+      etag: response.headers.get("etag"),
+      last_modified: response.headers.get("last-modified")
+    }
+  };
+  if (spec.returnContent) result.content = text;
+  else result.preview = preview(text);
+  return result;
+}
+
+function safeGitHubPart(value, name) {
+  const text = String(value || "").trim();
+  if (!/^[A-Za-z0-9_.-]+$/.test(text)) throw new Error(`Invalid GitHub ${name}`);
+  return text;
+}
+
+function safeGitHubRef(value) {
+  const text = String(value || DEFAULT_GITHUB_REF).trim();
+  if (!/^[A-Za-z0-9_./-]+$/.test(text) || text.includes("..")) throw new Error("Invalid GitHub ref");
+  return text;
+}
+
+function safeGitHubPath(value) {
+  const text = String(value || "").trim().replace(/^\/+/, "");
+  if (!text || text.includes("..") || text.includes("\\")) throw new Error("Invalid GitHub path");
+  return text;
 }
 
 async function getStone(env, hash) {
@@ -373,7 +593,7 @@ async function buildRefs({ stoneHash, path, rawKey, content }) {
 function buildReceipt({ content, refs, created }) {
   const originalBytes = utf8Bytes(content);
   const compressedBytes = utf8Bytes(JSON.stringify(refs));
-  return { original_bytes: originalBytes, compressed_bytes: compressedBytes, ratio: compressedBytes > 0 ? Number((originalBytes / compressedBytes).toFixed(2)) : 0, strategy: "cairnstone-v5.line-window-ref-index", created_at: created };
+  return { original_bytes: originalBytes, compressed_bytes: compressedBytes, ratio: compressedBytes > 0 ? Number((originalBytes / compressedBytes).toFixed(2)) : 0, strategy: "cairnstone-v5.server-side-github-fetch-ref-index", created_at: created };
 }
 
 function buildLayers({ title, author, repo, commit, content, refs, receipt, rawKey }) {

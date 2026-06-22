@@ -1,4 +1,4 @@
-const VERSION = "0.1.2";
+const VERSION = "0.1.3";
 const MCP_PROTOCOL_VERSION = "2025-03-26";
 const DEFAULT_LINES_PER_REF = 80;
 const DEFAULT_GITHUB_REF = "main";
@@ -12,6 +12,7 @@ export default {
       if (url.pathname === "/mcp") return handleMcp(request, env, url);
       if (request.method === "GET" && url.pathname === "/") return json(landing(env, url));
       if (request.method === "GET" && url.pathname === "/health") return json(health(env));
+      if (request.method === "GET" && url.pathname === "/v1/stones") return json(await listStones(env, url));
       if (request.method === "POST" && url.pathname === "/v1/stones") return json(await createStoneFromBody(await request.json(), env));
       if (request.method === "POST" && url.pathname === "/v1/stones/github") return json(await createStoneFromGitHubBody(await request.json(), env));
       if (request.method === "POST" && url.pathname === "/v1/fetch/github") return json(await fetchGitHubFileFromBody(await request.json(), env));
@@ -72,6 +73,7 @@ function routes() {
     "POST /mcp",
     "GET /mcp",
     "POST /v1/stones",
+    "GET /v1/stones",
     "POST /v1/stones/github",
     "POST /v1/fetch/github",
     "GET /v1/stones/:hash",
@@ -155,6 +157,7 @@ async function handleMcpRpc(rpc, env) {
 
 async function callMcpTool(name, args, env) {
   if (name === "cairnstone_health") return health(env);
+  if (name === "cairnstone_list_stones") return listStones(env, { origin: "mcp://cairnstone" });
   if (name === "cairnstone_fetch_github_file") return fetchGitHubFileFromBody(args, env);
   if (name === "cairnstone_create_stone") return createStoneFromBody(args, env);
   if (name === "cairnstone_create_github_file_stone") return createStoneFromGitHubBody(args, env);
@@ -172,6 +175,17 @@ function mcpTools() {
       name: "cairnstone_health",
       description: "Check CairnStone v5 MCP, D1, R2, and GitHub fetch status.",
       inputSchema: { type: "object", properties: {}, additionalProperties: false }
+    },
+    {
+      name: "cairnstone_list_stones",
+      description: "List CairnStone records in the vault with lightweight metadata for dashboards and handoff links.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          q: { type: "string" },
+          limit: { type: "number", minimum: 1, maximum: 200 }
+        }
+      }
     },
     {
       name: "cairnstone_fetch_github_file",
@@ -523,6 +537,53 @@ function safeGitHubPath(value) {
   const text = String(value || "").trim().replace(/^\/+/, "");
   if (!text || text.includes("..") || text.includes("\\")) throw new Error("Invalid GitHub path");
   return text;
+}
+
+async function listStones(env, urlOrParams = {}) {
+  requireBindings(env);
+  const q = String(urlOrParams.searchParams?.get?.("q") || urlOrParams.q || "").toLowerCase();
+  const limit = clamp(Number(urlOrParams.searchParams?.get?.("limit") || urlOrParams.limit || 100), 1, 200);
+  const origin = urlOrParams.origin || "";
+  const rows = await env.CAIRNSTONE_DB.prepare(
+    "SELECT s.hash,s.title,s.author,s.created_at,s.repo,s.commit_sha,s.raw_key,s.stone_json,r.original_bytes,r.compressed_bytes,r.ratio,r.strategy,(SELECT COUNT(*) FROM refs WHERE stone_hash=s.hash) refs_count FROM stones s LEFT JOIN receipts r ON r.stone_hash=s.hash ORDER BY s.created_at DESC LIMIT ?"
+  ).bind(limit).all();
+  let stones = rows.results.map(row => stoneListCard(row, origin));
+  if (q) stones = stones.filter(stone => JSON.stringify(stone).toLowerCase().includes(q));
+  const totals = stones.reduce((acc, stone) => {
+    acc.original_bytes += stone.original_bytes || 0;
+    acc.compressed_bytes += stone.compressed_bytes || 0;
+    acc.refs += stone.refs_count || 0;
+    return acc;
+  }, { original_bytes: 0, compressed_bytes: 0, refs: 0 });
+  totals.ratio = totals.compressed_bytes ? Number((totals.original_bytes / totals.compressed_bytes).toFixed(2)) : 0;
+  return { ok: true, total: stones.length, totals, stones };
+}
+
+function stoneListCard(row, origin) {
+  let stone = {};
+  try { stone = JSON.parse(row.stone_json || "{}"); } catch {}
+  const layers = stone.layers || {};
+  const metadata = stone.metadata || {};
+  const border = stone.border || {};
+  const hash = row.hash || border.hash;
+  return {
+    hash,
+    short_hash: String(hash || "").slice(0, 12),
+    title: row.title || border.title || "Untitled CairnStone",
+    author: row.author || border.author || "",
+    created_at: row.created_at || border.created || "",
+    repo: row.repo || border.repo || metadata.repo_url || "",
+    path: metadata.github?.path || "",
+    commit: row.commit_sha || border.commit || "",
+    refs_count: Number(row.refs_count || 0),
+    original_bytes: Number(row.original_bytes || layers.lod1?.raw_bytes || 0),
+    compressed_bytes: Number(row.compressed_bytes || 0),
+    ratio: Number(row.ratio || 0),
+    lod5: layers.lod5 || "",
+    lod4: layers.lod4 || "",
+    source_type: metadata.source_type || "stone",
+    share_url: origin && hash ? `${origin.replace(/\/$/, "")}/v1/stones/${hash}` : undefined
+  };
 }
 
 async function getStone(env, hash) {

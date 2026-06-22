@@ -1,0 +1,15 @@
+name = "cairnstone-v5"
+main = "src/index.ts"
+compatibility_date = "2026-06-21"
+
+[observability]
+enabled = true
+
+[[d1_databases]]
+binding = "CAIRNSTONE_DB"
+database_name = "cairnstone-v5"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+[[r2_buckets]]
+binding = "CAIRNSTONE_RAW"
+bucket_name = "cairnstone-v5-raw"

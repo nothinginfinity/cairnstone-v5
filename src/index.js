@@ -1,4 +1,4 @@
-const VERSION = "0.1.1";
+const VERSION = "0.1.2";
 const MCP_PROTOCOL_VERSION = "2025-03-26";
 const DEFAULT_LINES_PER_REF = 80;
 const DEFAULT_GITHUB_REF = "main";
@@ -16,6 +16,7 @@ export default {
       if (request.method === "POST" && url.pathname === "/v1/stones/github") return json(await createStoneFromGitHubBody(await request.json(), env));
       if (request.method === "POST" && url.pathname === "/v1/fetch/github") return json(await fetchGitHubFileFromBody(await request.json(), env));
       if (request.method === "POST" && url.pathname === "/v1/search") return json(await searchStonesFromBody(await request.json(), env));
+      if (request.method === "POST" && url.pathname === "/v1/query-expand") return json(await queryAndExpandFromBody(await request.json(), env));
       if (request.method === "POST" && url.pathname === "/v1/expand") return json(await expandRefFromBody(await request.json(), env));
 
       const stoneMatch = url.pathname.match(/^\/v1\/stones\/([^/]+)$/);
@@ -76,6 +77,7 @@ function routes() {
     "GET /v1/stones/:hash",
     "GET /v1/stones/:hash/lod/:level",
     "POST /v1/search",
+    "POST /v1/query-expand",
     "POST /v1/expand"
   ];
 }
@@ -157,6 +159,7 @@ async function callMcpTool(name, args, env) {
   if (name === "cairnstone_create_stone") return createStoneFromBody(args, env);
   if (name === "cairnstone_create_github_file_stone") return createStoneFromGitHubBody(args, env);
   if (name === "cairnstone_search") return searchStonesFromBody(args, env);
+  if (name === "cairnstone_query_and_expand") return queryAndExpandFromBody(args, env);
   if (name === "cairnstone_expand") return expandRefFromBody(args, env);
   if (name === "cairnstone_get_stone") return getStone(env, requiredString(args.hash, "hash"));
   if (name === "cairnstone_get_lod") return getLod(env, requiredString(args.hash, "hash"), requiredString(args.level, "level"));
@@ -238,6 +241,21 @@ function mcpTools() {
           query: { type: "string" },
           stone_hash: { type: "string" },
           limit: { type: "number", minimum: 1, maximum: 100 }
+        }
+      }
+    },
+    {
+      name: "cairnstone_query_and_expand",
+      description: "Fused server-side search plus expansion. Tokenizes a query into terms, ranks matching refs by overlap, expands only top_k winners, and returns final expanded text without returning unused chunk previews.",
+      inputSchema: {
+        type: "object",
+        required: ["stone_hash", "query"],
+        properties: {
+          stone_hash: { type: "string" },
+          query: { type: "string" },
+          top_k: { type: "number", minimum: 1, maximum: 10 },
+          context_lines: { type: "number", minimum: 0, maximum: 200 },
+          include_metadata: { type: "boolean" }
         }
       }
     },
@@ -551,6 +569,98 @@ async function searchStonesFromBody(body, env) {
   };
 }
 
+async function queryAndExpandFromBody(body, env) {
+  requireBindings(env);
+  const stoneHash = requiredString(body.stone_hash, "stone_hash");
+  const query = requiredString(body.query, "query");
+  const terms = tokenizeQuery(query);
+  if (!terms.length) return { ok: false, error: "empty_query_terms" };
+
+  const topK = clamp(Number(body.top_k || 1), 1, 10);
+  const context = clamp(optionalNumber(body.context_lines, 0), 0, 200);
+  const rows = await env.CAIRNSTONE_DB.prepare(
+    "SELECT * FROM refs WHERE stone_hash = ?"
+  ).bind(stoneHash).all();
+
+  const ranked = rows.results
+    .map(row => ({ row, score: scoreRowForTerms(row, terms) }))
+    .filter(item => item.score > 0)
+    .sort((a, b) => b.score - a.score || Number(a.row.line_start) - Number(b.row.line_start))
+    .slice(0, topK);
+
+  await logEvent(env, { stone_hash: stoneHash, query, event_type: "query_expand" });
+
+  if (!ranked.length) {
+    return { ok: false, error: "no_matching_ref", query, terms, text: "" };
+  }
+
+  const expanded = [];
+  for (const item of ranked) {
+    expanded.push(await expandRefRow(item.row, env, context, item.score));
+  }
+
+  const text = expanded.map(item => item.text).join("\n\n---\n\n");
+  if (!body.include_metadata) return { ok: true, query, text };
+  return {
+    ok: true,
+    query,
+    top_k: topK,
+    context_lines: context,
+    terms,
+    selected: expanded.map(item => ({
+      ref_id: item.ref_id,
+      stone_hash: item.stone_hash,
+      path: item.path,
+      line_start: item.line_start,
+      line_end: item.line_end,
+      score: item.score
+    })),
+    text
+  };
+}
+
+function tokenizeQuery(query) {
+  const stop = new Set(["the", "and", "for", "with", "that", "this", "from", "are", "was", "were", "have", "has", "not", "you", "your", "but", "can", "will", "all", "into", "our", "out", "use", "using", "true", "false", "null"]);
+  const terms = [];
+  const seen = new Set();
+  for (const match of String(query).toLowerCase().matchAll(/[a-z0-9_]{2,}/g)) {
+    const term = match[0];
+    if (stop.has(term) || seen.has(term)) continue;
+    seen.add(term);
+    terms.push(term);
+  }
+  return terms;
+}
+
+function scoreRowForTerms(row, terms) {
+  const haystack = `${row.keywords || ""} ${row.preview || ""} ${row.path || ""}`.toLowerCase();
+  let score = 0;
+  for (const term of terms) {
+    if (haystack.includes(term)) score += 1;
+  }
+  return score;
+}
+
+async function expandRefRow(row, env, context, score) {
+  const raw = await env.CAIRNSTONE_RAW.get(row.raw_key);
+  if (!raw) throw new Error(`raw_not_found: ${row.raw_key}`);
+  const text = await raw.text();
+  const lines = text.split(/\r?\n/);
+  const start = Math.max(1, Number(row.line_start) - context);
+  const end = Math.min(lines.length, Number(row.line_end) + context);
+  const window = lines.slice(start - 1, end).map((line, i) => ({ n: start + i, text: line }));
+  return {
+    ref_id: row.ref_id,
+    stone_hash: row.stone_hash,
+    path: row.path,
+    line_start: start,
+    line_end: end,
+    score,
+    text: window.map(line => line.text).join("\n"),
+    lines: window
+  };
+}
+
 async function expandRefFromBody(body, env) {
   requireBindings(env);
   const refId = body.ref_id || null;
@@ -566,7 +676,7 @@ async function expandRefFromBody(body, env) {
     ).bind(stoneHash, path, lineStart, lineStart).first();
   }
   if (!row) return { ok: false, error: "ref_not_found" };
-  const context = clamp(Number(body.context_lines || 10), 0, 200);
+  const context = clamp(optionalNumber(body.context_lines, 0), 0, 200);
   const raw = await env.CAIRNSTONE_RAW.get(row.raw_key);
   if (!raw) return { ok: false, error: "raw_not_found", raw_key: row.raw_key };
   const text = await raw.text();
@@ -669,6 +779,10 @@ function isObject(value) {
 function clamp(value, min, max) {
   if (!Number.isFinite(value)) return min;
   return Math.max(min, Math.min(max, Math.floor(value)));
+}
+
+function optionalNumber(value, fallback) {
+  return value === undefined || value === null || value === "" ? fallback : Number(value);
 }
 
 function json(data, status = 200) {

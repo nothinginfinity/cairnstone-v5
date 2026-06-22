@@ -371,7 +371,7 @@ async function createStoneFromBody(body, env) {
   const receipt = buildReceipt({ content, refs, created });
   const layers = buildLayers({ title, author, repo, commit, content, refs, receipt, rawKey });
   const stone = {
-    border: { hash: stoneHash, author, created, title, repo, commit, parent, chain, signature: null },
+    border: { hash: stoneHash, author, created, title, repo, commit, path, parent, chain, signature: null },
     layers,
     related: Array.isArray(body.related) ? body.related : [],
     metadata
@@ -588,7 +588,7 @@ function stoneListCard(row, origin) {
     author: row.author || border.author || "",
     created_at: row.created_at || border.created || "",
     repo: row.repo || border.repo || metadata.repo_url || "",
-    path: metadata.github?.path || "",
+    path: metadata.github?.path || border.path || "",
     commit: row.commit_sha || border.commit || "",
     refs_count: Number(row.refs_count || 0),
     original_bytes: Number(row.original_bytes || layers.lod1?.raw_bytes || 0),

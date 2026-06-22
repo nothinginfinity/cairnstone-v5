@@ -8,7 +8,7 @@ enabled = true
 [[d1_databases]]
 binding = "CAIRNSTONE_DB"
 database_name = "cairnstone-v5"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "60b8210c-7d5a-4d54-b0aa-7411fb4b9b95"
 
 [[r2_buckets]]
 binding = "CAIRNSTONE_RAW"

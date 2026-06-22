@@ -6,6 +6,7 @@ export default {
     const url = new URL(request.url);
     try {
       if (request.method === "OPTIONS") return withCors(new Response(null, { status: 204 }));
+      if (request.method === "GET" && url.pathname === "/") return json(landing(env, url));
       if (request.method === "GET" && url.pathname === "/health") return json(health(env));
       if (request.method === "POST" && url.pathname === "/v1/stones") return json(await createStone(request, env));
       if (request.method === "POST" && url.pathname === "/v1/search") return json(await searchStones(request, env));
@@ -24,6 +25,31 @@ export default {
   }
 };
 
+function landing(env, url) {
+  return {
+    ok: true,
+    name: "cairnstone-v5",
+    version: VERSION,
+    protocol: "FSL-CCR Stone v5",
+    message: "CairnStone v5 is live. Use /health for status, POST /v1/stones to create a stone, POST /v1/search to find refs, and POST /v1/expand to retrieve exact line windows.",
+    base_url: url.origin,
+    health: `${url.origin}/health`,
+    d1: Boolean(env.CAIRNSTONE_DB),
+    r2: Boolean(env.CAIRNSTONE_RAW),
+    endpoints: routes(),
+    example_create_stone: {
+      method: "POST",
+      path: "/v1/stones",
+      body: {
+        title: "Example CairnStone",
+        author: "jared@nothinginfinity",
+        path: "example.txt",
+        content: "CairnStone v5 stores raw content once, creates searchable refs, and expands exact line windows on demand."
+      }
+    }
+  };
+}
+
 function health(env) {
   return {
     ok: true,
@@ -38,6 +64,7 @@ function health(env) {
 
 function routes() {
   return [
+    "GET /",
     "GET /health",
     "POST /v1/stones",
     "GET /v1/stones/:hash",
@@ -72,7 +99,7 @@ async function createStone(request, env) {
   const stoneHash = await sha256(seed);
   const refs = await buildRefs({ stoneHash, path, rawKey, content });
   const receipt = buildReceipt({ content, refs, created });
-  const layers = buildLayers({ title, author, created, repo, commit, content, refs, receipt, rawKey });
+  const layers = buildLayers({ title, author, repo, commit, content, refs, receipt, rawKey });
   const stone = {
     border: {
       hash: stoneHash,

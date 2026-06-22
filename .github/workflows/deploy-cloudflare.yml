@@ -11,14 +11,16 @@ on:
         options:
           - "false"
           - "true"
-  push:
-    branches:
-      - main
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     name: Deploy Worker
+    permissions:
+      contents: read
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
       - uses: actions/checkout@v4
 
@@ -28,15 +30,12 @@ jobs:
 
       - run: npm install
 
+      - name: Show Wrangler version
+        run: npx wrangler --version
+
       - name: Apply D1 migrations
-        if: github.event_name == 'workflow_dispatch' && github.event.inputs.apply_migrations == 'true'
+        if: github.event.inputs.apply_migrations == 'true'
         run: npx wrangler d1 migrations apply cairnstone-v5 --remote
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
       - name: Deploy Worker
         run: npx wrangler deploy
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

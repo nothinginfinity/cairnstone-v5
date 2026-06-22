@@ -1,4 +1,5 @@
 const VERSION = "0.1.0";
+const MCP_PROTOCOL_VERSION = "2025-03-26";
 const DEFAULT_LINES_PER_REF = 80;
 
 export default {
@@ -6,11 +7,12 @@ export default {
     const url = new URL(request.url);
     try {
       if (request.method === "OPTIONS") return withCors(new Response(null, { status: 204 }));
+      if (url.pathname === "/mcp") return handleMcp(request, env, url);
       if (request.method === "GET" && url.pathname === "/") return json(landing(env, url));
       if (request.method === "GET" && url.pathname === "/health") return json(health(env));
-      if (request.method === "POST" && url.pathname === "/v1/stones") return json(await createStone(request, env));
-      if (request.method === "POST" && url.pathname === "/v1/search") return json(await searchStones(request, env));
-      if (request.method === "POST" && url.pathname === "/v1/expand") return json(await expandRef(request, env));
+      if (request.method === "POST" && url.pathname === "/v1/stones") return json(await createStoneFromBody(await request.json(), env));
+      if (request.method === "POST" && url.pathname === "/v1/search") return json(await searchStonesFromBody(await request.json(), env));
+      if (request.method === "POST" && url.pathname === "/v1/expand") return json(await expandRefFromBody(await request.json(), env));
 
       const stoneMatch = url.pathname.match(/^\/v1\/stones\/([^/]+)$/);
       if (request.method === "GET" && stoneMatch) return json(await getStone(env, stoneMatch[1]));
@@ -31,22 +33,14 @@ function landing(env, url) {
     name: "cairnstone-v5",
     version: VERSION,
     protocol: "FSL-CCR Stone v5",
-    message: "CairnStone v5 is live. Use /health for status, POST /v1/stones to create a stone, POST /v1/search to find refs, and POST /v1/expand to retrieve exact line windows.",
+    mcp: `${url.origin}/mcp`,
+    message: "CairnStone v5 is live. Claude and other MCP clients should connect to /mcp. REST clients can use /health, /v1/stones, /v1/search, and /v1/expand.",
     base_url: url.origin,
     health: `${url.origin}/health`,
     d1: Boolean(env.CAIRNSTONE_DB),
     r2: Boolean(env.CAIRNSTONE_RAW),
     endpoints: routes(),
-    example_create_stone: {
-      method: "POST",
-      path: "/v1/stones",
-      body: {
-        title: "Example CairnStone",
-        author: "jared@nothinginfinity",
-        path: "example.txt",
-        content: "CairnStone v5 stores raw content once, creates searchable refs, and expands exact line windows on demand."
-      }
-    }
+    mcp_tools: mcpTools().map(tool => tool.name)
   };
 }
 
@@ -56,9 +50,11 @@ function health(env) {
     name: "cairnstone-v5",
     version: VERSION,
     protocol: "FSL-CCR Stone v5",
+    mcp_protocol_version: MCP_PROTOCOL_VERSION,
     d1: Boolean(env.CAIRNSTONE_DB),
     r2: Boolean(env.CAIRNSTONE_RAW),
-    endpoints: routes()
+    endpoints: routes(),
+    mcp_tools: mcpTools().map(tool => tool.name)
   };
 }
 
@@ -66,6 +62,8 @@ function routes() {
   return [
     "GET /",
     "GET /health",
+    "POST /mcp",
+    "GET /mcp",
     "POST /v1/stones",
     "GET /v1/stones/:hash",
     "GET /v1/stones/:hash/lod/:level",
@@ -74,9 +72,173 @@ function routes() {
   ];
 }
 
-async function createStone(request, env) {
+async function handleMcp(request, env, url) {
+  if (request.method === "GET") {
+    return json({
+      ok: true,
+      name: "cairnstone-v5-mcp",
+      version: VERSION,
+      protocol: "MCP JSON-RPC over HTTP",
+      endpoint: `${url.origin}/mcp`,
+      methods: ["initialize", "tools/list", "tools/call"],
+      tools: mcpTools().map(tool => ({ name: tool.name, description: tool.description }))
+    });
+  }
+
+  if (request.method !== "POST") {
+    return json({ ok: false, error: "method_not_allowed" }, 405);
+  }
+
+  let rpc;
+  try {
+    rpc = await request.json();
+  } catch (error) {
+    return json(rpcError(null, -32700, "Parse error"), 400);
+  }
+
+  if (Array.isArray(rpc)) {
+    const results = [];
+    for (const item of rpc) {
+      const result = await handleMcpRpc(item, env);
+      if (result) results.push(result);
+    }
+    if (!results.length) return withCors(new Response(null, { status: 202 }));
+    return json(results);
+  }
+
+  const result = await handleMcpRpc(rpc, env);
+  if (!result) return withCors(new Response(null, { status: 202 }));
+  return json(result);
+}
+
+async function handleMcpRpc(rpc, env) {
+  const id = rpc && Object.prototype.hasOwnProperty.call(rpc, "id") ? rpc.id : null;
+  const method = rpc && rpc.method;
+  const params = isObject(rpc && rpc.params) ? rpc.params : {};
+
+  try {
+    if (method === "initialize") {
+      return rpcResult(id, {
+        protocolVersion: MCP_PROTOCOL_VERSION,
+        capabilities: { tools: {} },
+        serverInfo: { name: "cairnstone-v5", version: VERSION }
+      });
+    }
+
+    if (method === "notifications/initialized") {
+      return null;
+    }
+
+    if (method === "ping") {
+      return rpcResult(id, {});
+    }
+
+    if (method === "tools/list") {
+      return rpcResult(id, { tools: mcpTools() });
+    }
+
+    if (method === "tools/call") {
+      const name = requiredString(params.name, "name");
+      const args = isObject(params.arguments) ? params.arguments : {};
+      const output = await callMcpTool(name, args, env);
+      return rpcResult(id, {
+        content: [{ type: "text", text: JSON.stringify(output, null, 2) }],
+        isError: output && output.ok === false
+      });
+    }
+
+    return rpcError(id, -32601, `Method not found: ${method}`);
+  } catch (error) {
+    return rpcError(id, -32000, String(error && error.message ? error.message : error));
+  }
+}
+
+async function callMcpTool(name, args, env) {
+  if (name === "cairnstone_health") return health(env);
+  if (name === "cairnstone_create_stone") return createStoneFromBody(args, env);
+  if (name === "cairnstone_search") return searchStonesFromBody(args, env);
+  if (name === "cairnstone_expand") return expandRefFromBody(args, env);
+  if (name === "cairnstone_get_stone") return getStone(env, requiredString(args.hash, "hash"));
+  if (name === "cairnstone_get_lod") return getLod(env, requiredString(args.hash, "hash"), requiredString(args.level, "level"));
+  return { ok: false, error: "unknown_tool", name };
+}
+
+function mcpTools() {
+  return [
+    {
+      name: "cairnstone_health",
+      description: "Check CairnStone v5 MCP, D1, and R2 status.",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false }
+    },
+    {
+      name: "cairnstone_create_stone",
+      description: "Create a CairnStone from raw text content. Stores raw content in R2, creates searchable refs in D1, and returns LOD layers plus a compression receipt.",
+      inputSchema: {
+        type: "object",
+        required: ["title", "author", "content"],
+        properties: {
+          title: { type: "string" },
+          author: { type: "string" },
+          content: { type: "string" },
+          path: { type: "string" },
+          repo: { type: "string" },
+          commit: { type: "string" },
+          parent: { type: "string" },
+          chain: { type: "string" },
+          related: { type: "array", items: { type: "string" } },
+          metadata: { type: "object" }
+        }
+      }
+    },
+    {
+      name: "cairnstone_search",
+      description: "Search compressed CairnStone refs before expanding raw content.",
+      inputSchema: {
+        type: "object",
+        required: ["query"],
+        properties: {
+          query: { type: "string" },
+          stone_hash: { type: "string" },
+          limit: { type: "number", minimum: 1, maximum: 100 }
+        }
+      }
+    },
+    {
+      name: "cairnstone_expand",
+      description: "Expand a selected CairnStone ref into exact raw line-window content from R2.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          ref_id: { type: "string" },
+          stone_hash: { type: "string" },
+          path: { type: "string" },
+          line_start: { type: "number" },
+          context_lines: { type: "number", minimum: 0, maximum: 200 }
+        }
+      }
+    },
+    {
+      name: "cairnstone_get_stone",
+      description: "Get a complete CairnStone record by hash.",
+      inputSchema: { type: "object", required: ["hash"], properties: { hash: { type: "string" } } }
+    },
+    {
+      name: "cairnstone_get_lod",
+      description: "Get one CairnStone LOD layer by hash and level.",
+      inputSchema: {
+        type: "object",
+        required: ["hash", "level"],
+        properties: {
+          hash: { type: "string" },
+          level: { type: "string", enum: ["lod1", "lod2", "lod3", "lod4", "lod5"] }
+        }
+      }
+    }
+  ];
+}
+
+async function createStoneFromBody(body, env) {
   requireBindings(env);
-  const body = await request.json();
   const content = requiredString(body.content, "content");
   const title = requiredString(body.title, "title");
   const author = requiredString(body.author, "author");
@@ -101,17 +263,7 @@ async function createStone(request, env) {
   const receipt = buildReceipt({ content, refs, created });
   const layers = buildLayers({ title, author, repo, commit, content, refs, receipt, rawKey });
   const stone = {
-    border: {
-      hash: stoneHash,
-      author,
-      created,
-      title,
-      repo,
-      commit,
-      parent,
-      chain,
-      signature: null
-    },
+    border: { hash: stoneHash, author, created, title, repo, commit, parent, chain, signature: null },
     layers,
     related: Array.isArray(body.related) ? body.related : [],
     metadata
@@ -145,12 +297,13 @@ async function getStone(env, hash) {
 async function getLod(env, hash, level) {
   const result = await getStone(env, hash);
   if (!result.ok) return result;
-  return { ok: true, hash, level, value: result.stone.layers[level] };
+  const value = result.stone.layers[level];
+  if (value === undefined) return { ok: false, error: "lod_not_found", hash, level };
+  return { ok: true, hash, level, value };
 }
 
-async function searchStones(request, env) {
+async function searchStonesFromBody(body, env) {
   requireBindings(env);
-  const body = await request.json();
   const query = requiredString(body.query, "query").toLowerCase();
   const limit = clamp(Number(body.limit || 20), 1, 100);
   const stoneHash = body.stone_hash || null;
@@ -160,9 +313,7 @@ async function searchStones(request, env) {
     ? "SELECT ref_id,stone_hash,path,line_start,line_end,keywords,preview FROM refs WHERE stone_hash = ? AND (LOWER(keywords) LIKE ? OR LOWER(preview) LIKE ?) LIMIT ?"
     : "SELECT ref_id,stone_hash,path,line_start,line_end,keywords,preview FROM refs WHERE LOWER(keywords) LIKE ? OR LOWER(preview) LIKE ? LIMIT ?";
   const stmt = env.CAIRNSTONE_DB.prepare(sql);
-  const rows = stoneHash
-    ? await stmt.bind(stoneHash, like, like, limit).all()
-    : await stmt.bind(like, like, limit).all();
+  const rows = stoneHash ? await stmt.bind(stoneHash, like, like, limit).all() : await stmt.bind(like, like, limit).all();
   await logEvent(env, { stone_hash: stoneHash, query, event_type: "search" });
   return {
     ok: true,
@@ -180,9 +331,8 @@ async function searchStones(request, env) {
   };
 }
 
-async function expandRef(request, env) {
+async function expandRefFromBody(body, env) {
   requireBindings(env);
-  const body = await request.json();
   const refId = body.ref_id || null;
   let row;
   if (refId) {
@@ -205,16 +355,7 @@ async function expandRef(request, env) {
   const end = Math.min(lines.length, Number(row.line_end) + context);
   const window = lines.slice(start - 1, end).map((line, i) => ({ n: start + i, text: line }));
   await logEvent(env, { stone_hash: row.stone_hash, ref_id: row.ref_id, event_type: "expand" });
-  return {
-    ok: true,
-    ref_id: row.ref_id,
-    stone_hash: row.stone_hash,
-    path: row.path,
-    line_start: start,
-    line_end: end,
-    text: window.map(line => line.text).join("\n"),
-    lines: window
-  };
+  return { ok: true, ref_id: row.ref_id, stone_hash: row.stone_hash, path: row.path, line_start: start, line_end: end, text: window.map(line => line.text).join("\n"), lines: window };
 }
 
 async function buildRefs({ stoneHash, path, rawKey, content }) {
@@ -224,16 +365,7 @@ async function buildRefs({ stoneHash, path, rawKey, content }) {
     const chunkLines = lines.slice(i, i + DEFAULT_LINES_PER_REF);
     const text = chunkLines.join("\n");
     const chunkHash = await sha256(`${stoneHash}:${path}:${i + 1}:${text}`);
-    refs.push({
-      ref_id: `fsl:${chunkHash.slice(0, 16)}`,
-      stone_hash: stoneHash,
-      path,
-      line_start: i + 1,
-      line_end: i + chunkLines.length,
-      keywords: extractKeywords(text, 12),
-      preview: preview(text),
-      raw_key: rawKey
-    });
+    refs.push({ ref_id: `fsl:${chunkHash.slice(0, 16)}`, stone_hash: stoneHash, path, line_start: i + 1, line_end: i + chunkLines.length, keywords: extractKeywords(text, 12), preview: preview(text), raw_key: rawKey });
   }
   return refs;
 }
@@ -241,13 +373,7 @@ async function buildRefs({ stoneHash, path, rawKey, content }) {
 function buildReceipt({ content, refs, created }) {
   const originalBytes = utf8Bytes(content);
   const compressedBytes = utf8Bytes(JSON.stringify(refs));
-  return {
-    original_bytes: originalBytes,
-    compressed_bytes: compressedBytes,
-    ratio: compressedBytes > 0 ? Number((originalBytes / compressedBytes).toFixed(2)) : 0,
-    strategy: "cairnstone-v5.line-window-ref-index",
-    created_at: created
-  };
+  return { original_bytes: originalBytes, compressed_bytes: compressedBytes, ratio: compressedBytes > 0 ? Number((originalBytes / compressedBytes).toFixed(2)) : 0, strategy: "cairnstone-v5.line-window-ref-index", created_at: created };
 }
 
 function buildLayers({ title, author, repo, commit, content, refs, receipt, rawKey }) {
@@ -256,13 +382,7 @@ function buildLayers({ title, author, repo, commit, content, refs, receipt, rawK
   const lod5 = `${title}: ${lineCount} lines, ${refs.length} refs, ${receipt.ratio}x ratio`;
   const lod4 = [lod5, `author=${author}`, repo ? `repo=${repo}` : null, commit ? `commit=${commit}` : null, `top=${topKeywords.slice(0, 8).join(",")}`].filter(Boolean).join(" | ");
   const lod3 = refs.slice(0, 24).map(ref => `${ref.ref_id} ${ref.path}:${ref.line_start}-${ref.line_end} ${ref.keywords.slice(0, 5).join(",")}`).join("\n");
-  return {
-    lod5,
-    lod4,
-    lod3,
-    lod2: { compressed_index: refs, receipt },
-    lod1: { raw_key: rawKey, raw_bytes: receipt.original_bytes }
-  };
+  return { lod5, lod4, lod3, lod2: { compressed_index: refs, receipt }, lod1: { raw_key: rawKey, raw_bytes: receipt.original_bytes } };
 }
 
 function extractKeywords(text, limit) {
@@ -300,6 +420,14 @@ function stableJson(value) {
   return JSON.stringify(value);
 }
 
+function rpcResult(id, result) {
+  return { jsonrpc: "2.0", id, result };
+}
+
+function rpcError(id, code, message) {
+  return { jsonrpc: "2.0", id, error: { code, message } };
+}
+
 function utf8Bytes(value) {
   return new TextEncoder().encode(value).length;
 }
@@ -331,6 +459,7 @@ function withCors(response) {
   const headers = new Headers(response.headers);
   headers.set("Access-Control-Allow-Origin", "*");
   headers.set("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  headers.set("Access-Control-Allow-Headers", "Content-Type");
+  headers.set("Access-Control-Allow-Headers", "Content-Type,Authorization,Mcp-Session-Id");
+  headers.set("Access-Control-Expose-Headers", "Mcp-Session-Id");
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }

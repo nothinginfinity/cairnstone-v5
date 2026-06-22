@@ -749,16 +749,66 @@ async function expandRefFromBody(body, env) {
   return { ok: true, ref_id: row.ref_id, stone_hash: row.stone_hash, path: row.path, line_start: start, line_end: end, text: window.map(line => line.text).join("\n"), lines: window };
 }
 
+const FLAG_PATTERNS = [
+  { type: "empty_catch", re: /catch\s*\([^)]*\)\s*\{\s*\}/g },
+  { type: "var_usage", re: /\bvar\s+[a-zA-Z_$]/g },
+  { type: "console_debug", re: /\bconsole\.(log|debug|warn)\s*\(/g },
+  { type: "debugger_statement", re: /\bdebugger\b/g },
+  { type: "todo_comment", re: /\b(TODO|FIXME|XXX|HACK)\b/g },
+  { type: "hardcoded_secret", re: /(api[_-]?key|secret|password|pass|token)\w*\s*[:=]\s*["'][^"']{4,}["']/gi }
+];
+
+function detectFlags(text) {
+  const flags = [];
+  for (const { type, re } of FLAG_PATTERNS) {
+    const matches = [...text.matchAll(re)];
+    if (matches.length) flags.push({ type, count: matches.length });
+  }
+  const lines = text.split(/\r?\n/);
+  const longLines = lines.filter(l => l.length > 300).length;
+  if (longLines) flags.push({ type: "long_line", count: longLines });
+  return flags;
+}
+
 async function buildRefs({ stoneHash, path, rawKey, content }) {
   const lines = content.split(/\r?\n/);
   const refs = [];
+  const byNormalized = new Map();
   for (let i = 0; i < lines.length; i += DEFAULT_LINES_PER_REF) {
     const chunkLines = lines.slice(i, i + DEFAULT_LINES_PER_REF);
     const text = chunkLines.join("\n");
     const chunkHash = await sha256(`${stoneHash}:${path}:${i + 1}:${text}`);
-    refs.push({ ref_id: `fsl:${chunkHash.slice(0, 16)}`, stone_hash: stoneHash, path, line_start: i + 1, line_end: i + chunkLines.length, keywords: extractKeywords(text, 12), preview: preview(text), raw_key: rawKey });
+    const refId = `fsl:${chunkHash.slice(0, 16)}`;
+    const ref = { ref_id: refId, stone_hash: stoneHash, path, line_start: i + 1, line_end: i + chunkLines.length, keywords: extractKeywords(text, 12), preview: preview(text), raw_key: rawKey, flags: detectFlags(text) };
+    refs.push(ref);
+    const normalized = text.replace(/\s+/g, " ").trim();
+    if (normalized.length > 40) {
+      if (!byNormalized.has(normalized)) byNormalized.set(normalized, []);
+      byNormalized.get(normalized).push(refId);
+    }
+  }
+  // mark duplicate chunks: any two refs whose normalized text matches exactly
+  for (const ids of byNormalized.values()) {
+    if (ids.length <= 1) continue;
+    for (const ref of refs) {
+      if (!ids.includes(ref.ref_id)) continue;
+      ref.flags.push({ type: "duplicate_chunk", count: ids.length - 1, with: ids.filter(id => id !== ref.ref_id) });
+    }
   }
   return refs;
+}
+
+function aggregateFlags(refs) {
+  const counts = {};
+  let total = 0;
+  for (const ref of refs) {
+    for (const flag of ref.flags || []) {
+      counts[flag.type] = (counts[flag.type] || 0) + (flag.count || 1);
+      total += flag.count || 1;
+    }
+  }
+  const summary = Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}:${v}`).join(",");
+  return { total, summary, counts };
 }
 
 function buildReceipt({ content, refs, created }) {
@@ -770,9 +820,13 @@ function buildReceipt({ content, refs, created }) {
 function buildLayers({ title, author, repo, commit, content, refs, receipt, rawKey }) {
   const lineCount = content.split(/\r?\n/).length;
   const topKeywords = extractKeywords(content, 16);
-  const lod5 = `${title}: ${lineCount} lines, ${refs.length} refs, ${receipt.ratio}x ratio`;
-  const lod4 = [lod5, `author=${author}`, repo ? `repo=${repo}` : null, commit ? `commit=${commit}` : null, `top=${topKeywords.slice(0, 8).join(",")}`].filter(Boolean).join(" | ");
-  const lod3 = refs.slice(0, 24).map(ref => `${ref.ref_id} ${ref.path}:${ref.line_start}-${ref.line_end} ${ref.keywords.slice(0, 5).join(",")}`).join("\n");
+  const flagInfo = aggregateFlags(refs);
+  const lod5 = `${title}: ${lineCount} lines, ${refs.length} refs, ${receipt.ratio}x ratio${flagInfo.total ? `, ${flagInfo.total} flags` : ""}`;
+  const lod4 = [lod5, `author=${author}`, repo ? `repo=${repo}` : null, commit ? `commit=${commit}` : null, `top=${topKeywords.slice(0, 8).join(",")}`, flagInfo.total ? `flags=${flagInfo.summary}` : null].filter(Boolean).join(" | ");
+  const lod3 = refs.slice(0, 24).map(ref => {
+    const flagStr = ref.flags && ref.flags.length ? ` \u26a0${ref.flags.map(f => f.type).join(",")}` : "";
+    return `${ref.ref_id} ${ref.path}:${ref.line_start}-${ref.line_end} ${ref.keywords.slice(0, 5).join(",")}${flagStr}`;
+  }).join("\n");
   return { lod5, lod4, lod3, lod2: { compressed_index: refs, receipt }, lod1: { raw_key: rawKey, raw_bytes: receipt.original_bytes } };
 }
 

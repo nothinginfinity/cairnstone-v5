@@ -157,7 +157,7 @@ async function handleMcpRpc(rpc, env) {
 
 async function callMcpTool(name, args, env) {
   if (name === "cairnstone_health") return health(env);
-  if (name === "cairnstone_list_stones") return listStones(env, { origin: "mcp://cairnstone" });
+  if (name === "cairnstone_list_stones") return listStones(env, { ...args, origin: "mcp://cairnstone" });
   if (name === "cairnstone_fetch_github_file") return fetchGitHubFileFromBody(args, env);
   if (name === "cairnstone_create_stone") return createStoneFromBody(args, env);
   if (name === "cairnstone_create_github_file_stone") return createStoneFromGitHubBody(args, env);

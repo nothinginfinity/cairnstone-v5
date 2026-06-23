@@ -186,6 +186,7 @@ function mcpTools() {
         type: "object",
         properties: {
           q: { type: "string" },
+          chain: { type: "string", description: "Exact match filter on the stone's chain tag (e.g. a repo name used to group its file stones)." },
           limit: { type: "number", minimum: 1, maximum: 200 }
         }
       }
@@ -557,12 +558,16 @@ function safeGitHubPath(value) {
 async function listStones(env, urlOrParams = {}) {
   requireBindings(env);
   const q = String(urlOrParams.searchParams?.get?.("q") || urlOrParams.q || "").toLowerCase();
+  const chainFilter = String(urlOrParams.searchParams?.get?.("chain") || urlOrParams.chain || "");
   const limit = clamp(Number(urlOrParams.searchParams?.get?.("limit") || urlOrParams.limit || 100), 1, 200);
   const origin = urlOrParams.origin || "";
+  const filtering = Boolean(q || chainFilter);
+  const fetchLimit = filtering ? 2000 : limit;
   const rows = await env.CAIRNSTONE_DB.prepare(
-    "SELECT s.hash,s.title,s.author,s.created_at,s.repo,s.commit_sha,s.raw_key,s.stone_json,r.original_bytes,r.compressed_bytes,r.ratio,r.strategy,(SELECT COUNT(*) FROM refs WHERE stone_hash=s.hash) refs_count FROM stones s LEFT JOIN receipts r ON r.stone_hash=s.hash ORDER BY s.created_at DESC LIMIT ?"
-  ).bind(limit).all();
+    "SELECT s.hash,s.title,s.author,s.created_at,s.repo,s.commit_sha,s.chain_hash,s.raw_key,s.stone_json,r.original_bytes,r.compressed_bytes,r.ratio,r.strategy,(SELECT COUNT(*) FROM refs WHERE stone_hash=s.hash) refs_count FROM stones s LEFT JOIN receipts r ON r.stone_hash=s.hash ORDER BY s.created_at DESC LIMIT ?"
+  ).bind(fetchLimit).all();
   let stones = rows.results.map(row => stoneListCard(row, origin));
+  if (chainFilter) stones = stones.filter(stone => stone.chain === chainFilter);
   if (q) stones = stones.filter(stone => JSON.stringify(stone).toLowerCase().includes(q));
   const totals = stones.reduce((acc, stone) => {
     acc.original_bytes += stone.original_bytes || 0;
@@ -571,7 +576,9 @@ async function listStones(env, urlOrParams = {}) {
     return acc;
   }, { original_bytes: 0, compressed_bytes: 0, refs: 0 });
   totals.ratio = totals.compressed_bytes ? Number((totals.original_bytes / totals.compressed_bytes).toFixed(2)) : 0;
-  return { ok: true, total: stones.length, totals, stones };
+  const total = stones.length;
+  stones = stones.slice(0, limit);
+  return { ok: true, total, totals, stones };
 }
 
 function stoneListCard(row, origin) {
@@ -589,6 +596,7 @@ function stoneListCard(row, origin) {
     created_at: row.created_at || border.created || "",
     repo: row.repo || border.repo || metadata.repo_url || "",
     path: metadata.github?.path || border.path || "",
+    chain: row.chain_hash || border.chain || "",
     commit: row.commit_sha || border.commit || "",
     refs_count: Number(row.refs_count || 0),
     original_bytes: Number(row.original_bytes || layers.lod1?.raw_bytes || 0),

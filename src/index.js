@@ -1,6 +1,6 @@
 import { parse as babelParse } from "@babel/parser";
 
-const VERSION = "0.2.0";
+const VERSION = "0.3.0";
 const MCP_PROTOCOL_VERSION = "2025-03-26";
 const DEFAULT_LINES_PER_REF = 80;
 const DEFAULT_GITHUB_REF = "main";
@@ -169,6 +169,9 @@ async function callMcpTool(name, args, env) {
   if (name === "cairnstone_get_stone") return getStone(env, requiredString(args.hash, "hash"));
   if (name === "cairnstone_get_lod") return getLod(env, requiredString(args.hash, "hash"), requiredString(args.level, "level"));
   if (name === "cairnstone_lint_stone") return lintStoneFromBody(args, env);
+  if (name === "cairnstone_link_stones") return linkStonesFromBody(args, env);
+  if (name === "cairnstone_set_head") return setHeadFromBody(args, env);
+  if (name === "cairnstone_get_chain_manifest") return getChainManifest(env, requiredString(args.chain, "chain"));
   return { ok: false, error: "unknown_tool", name };
 }
 
@@ -225,7 +228,8 @@ function mcpTools() {
           parent: { type: "string" },
           chain: { type: "string" },
           related: { type: "array", items: { type: "string" } },
-          metadata: { type: "object" }
+          metadata: { type: "object" },
+          set_as_head: { type: "boolean", description: "Mark this stone as the chain's current HEAD on creation. Defaults to false - opt in explicitly for stones meant to be the new canonical version, not for notes/reviews/orientation stones." }
         }
       }
     },
@@ -245,7 +249,8 @@ function mcpTools() {
           parent: { type: "string" },
           chain: { type: "string" },
           related: { type: "array", items: { type: "string" } },
-          metadata: { type: "object" }
+          metadata: { type: "object" },
+          set_as_head: { type: "boolean", description: "Mark this stone as the chain's current HEAD on creation. Defaults to false - opt in explicitly when this is meant to be the new canonical version of the file." }
         }
       }
     },
@@ -317,6 +322,43 @@ function mcpTools() {
         properties: {
           stone_hash: { type: "string" },
           language: { type: "string", enum: ["javascript", "typescript", "jsx", "tsx"], description: "Override auto-detection from file extension." }
+        }
+      }
+    },
+    {
+      name: "cairnstone_link_stones",
+      description: "Create a typed relationship edge between two stones, so the vault stays navigable as it grows past a few hundred stones. Use this whenever one stone's relationship to another matters: a re-stoned file that supersedes an older version of itself, a fix stone that patches a problem found in a review, an orientation stone that documents a set of file stones, or a review-report stone that reviews the stone it evaluated.",
+      inputSchema: {
+        type: "object",
+        required: ["from_hash", "to_hash", "edge_type"],
+        properties: {
+          from_hash: { type: "string" },
+          to_hash: { type: "string" },
+          edge_type: { type: "string", enum: ["supersedes", "patches", "documents", "reviews", "references"] },
+          note: { type: "string" }
+        }
+      }
+    },
+    {
+      name: "cairnstone_set_head",
+      description: "Mark a stone as the current HEAD for its chain - the canonical, up-to-date version. Use this after stoning a new revision of a file you want future chats to treat as authoritative, instead of making them guess from created_at timestamps.",
+      inputSchema: {
+        type: "object",
+        required: ["chain", "hash"],
+        properties: {
+          chain: { type: "string" },
+          hash: { type: "string" }
+        }
+      }
+    },
+    {
+      name: "cairnstone_get_chain_manifest",
+      description: "Get a navigational summary of an entire chain in one call: every stone's lod5, which one is HEAD, and every graph edge connecting them. Computed fresh from current data every time (never stale). Call this FIRST when picking up work on a chain you haven't seen recently, before listing or expanding individual stones.",
+      inputSchema: {
+        type: "object",
+        required: ["chain"],
+        properties: {
+          chain: { type: "string" }
         }
       }
     }
@@ -392,6 +434,10 @@ async function createStoneFromBody(body, env) {
   await env.CAIRNSTONE_DB.prepare(
     "INSERT INTO receipts (id,stone_hash,original_bytes,compressed_bytes,ratio,strategy,created_at) VALUES (?,?,?,?,?,?,?)"
   ).bind(receiptId, stoneHash, receipt.original_bytes, receipt.compressed_bytes, receipt.ratio, receipt.strategy, created).run();
+
+  if (chain && body.set_as_head) {
+    await upsertHead(env, chain, stoneHash, created);
+  }
 
   return { ok: true, stone_hash: stoneHash, raw_key: rawKey, refs: refs.length, receipt, source: normalized.source, stone };
 }
@@ -569,6 +615,9 @@ async function listStones(env, urlOrParams = {}) {
   let stones = rows.results.map(row => stoneListCard(row, origin));
   if (chainFilter) stones = stones.filter(stone => stone.chain === chainFilter);
   if (q) stones = stones.filter(stone => JSON.stringify(stone).toLowerCase().includes(q));
+  const headRows = await env.CAIRNSTONE_DB.prepare("SELECT chain, head_hash FROM chain_heads").all();
+  const headsMap = new Map(headRows.results.map(r => [r.chain, r.head_hash]));
+  for (const stone of stones) stone.is_head = headsMap.get(stone.chain) === stone.hash;
   const totals = stones.reduce((acc, stone) => {
     acc.original_bytes += stone.original_bytes || 0;
     acc.compressed_bytes += stone.compressed_bytes || 0;
@@ -622,6 +671,84 @@ async function getLod(env, hash, level) {
   const value = result.stone.layers[level];
   if (value === undefined) return { ok: false, error: "lod_not_found", hash, level };
   return { ok: true, hash, level, value };
+}
+
+const EDGE_TYPES = ["supersedes", "patches", "documents", "reviews", "references"];
+
+async function upsertHead(env, chain, hash, updatedAt) {
+  await env.CAIRNSTONE_DB.prepare(
+    "INSERT INTO chain_heads (chain,head_hash,updated_at) VALUES (?,?,?) ON CONFLICT(chain) DO UPDATE SET head_hash=excluded.head_hash, updated_at=excluded.updated_at"
+  ).bind(chain, hash, updatedAt).run();
+}
+
+async function linkStonesFromBody(body, env) {
+  requireBindings(env);
+  const fromHash = requiredString(body.from_hash, "from_hash");
+  const toHash = requiredString(body.to_hash, "to_hash");
+  const edgeType = requiredString(body.edge_type, "edge_type");
+  if (!EDGE_TYPES.includes(edgeType)) return { ok: false, error: "invalid_edge_type", allowed: EDGE_TYPES };
+  const fromRow = await env.CAIRNSTONE_DB.prepare("SELECT hash FROM stones WHERE hash = ?").bind(fromHash).first();
+  if (!fromRow) return { ok: false, error: "from_stone_not_found", hash: fromHash };
+  const toRow = await env.CAIRNSTONE_DB.prepare("SELECT hash FROM stones WHERE hash = ?").bind(toHash).first();
+  if (!toRow) return { ok: false, error: "to_stone_not_found", hash: toHash };
+  const created = new Date().toISOString();
+  const id = await sha256(`${fromHash}:${toHash}:${edgeType}:${created}`);
+  await env.CAIRNSTONE_DB.prepare(
+    "INSERT INTO stone_edges (id,from_hash,to_hash,edge_type,note,created_at) VALUES (?,?,?,?,?,?)"
+  ).bind(id, fromHash, toHash, edgeType, body.note || null, created).run();
+  return { ok: true, id, from_hash: fromHash, to_hash: toHash, edge_type: edgeType, note: body.note || null, created_at: created };
+}
+
+async function setHeadFromBody(body, env) {
+  requireBindings(env);
+  const chain = requiredString(body.chain, "chain");
+  const hash = requiredString(body.hash, "hash");
+  const row = await env.CAIRNSTONE_DB.prepare("SELECT chain_hash FROM stones WHERE hash = ?").bind(hash).first();
+  if (!row) return { ok: false, error: "stone_not_found", hash };
+  if (row.chain_hash !== chain) return { ok: false, error: "chain_mismatch", stone_chain: row.chain_hash, requested_chain: chain };
+  const updated = new Date().toISOString();
+  await upsertHead(env, chain, hash, updated);
+  return { ok: true, chain, head_hash: hash, updated_at: updated };
+}
+
+async function getChainManifest(env, chain) {
+  requireBindings(env);
+  const headRow = await env.CAIRNSTONE_DB.prepare("SELECT head_hash, updated_at FROM chain_heads WHERE chain = ?").bind(chain).first();
+  const stoneRows = await env.CAIRNSTONE_DB.prepare(
+    "SELECT hash,title,author,created_at,stone_json FROM stones WHERE chain_hash = ? ORDER BY created_at ASC"
+  ).bind(chain).all();
+  const hashes = stoneRows.results.map(r => r.hash);
+  let edges = [];
+  if (hashes.length) {
+    const placeholders = hashes.map(() => "?").join(",");
+    const edgeRows = await env.CAIRNSTONE_DB.prepare(
+      `SELECT id,from_hash,to_hash,edge_type,note,created_at FROM stone_edges WHERE from_hash IN (${placeholders}) OR to_hash IN (${placeholders})`
+    ).bind(...hashes, ...hashes).all();
+    edges = edgeRows.results;
+  }
+  const nodes = stoneRows.results.map(row => {
+    let stone = {};
+    try { stone = JSON.parse(row.stone_json || "{}"); } catch {}
+    const layers = stone.layers || {};
+    return {
+      hash: row.hash,
+      short_hash: row.hash.slice(0, 12),
+      title: row.title,
+      author: row.author,
+      created_at: row.created_at,
+      is_head: headRow ? headRow.head_hash === row.hash : false,
+      lod5: layers.lod5 || ""
+    };
+  });
+  return {
+    ok: true,
+    chain,
+    head_hash: headRow ? headRow.head_hash : null,
+    head_updated_at: headRow ? headRow.updated_at : null,
+    stone_count: nodes.length,
+    nodes,
+    edges
+  };
 }
 
 function pluginsForLanguage(language) {

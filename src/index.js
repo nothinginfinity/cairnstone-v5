@@ -258,6 +258,29 @@ function mcpTools() {
       }
     },
     {
+      name: "cairnstone_create_repo_stones",
+      description: "Walk a GitHub repository, create CairnStones for accepted files, generate an orientation stone, link it to file stones, and set it as chain HEAD.",
+      inputSchema: {
+        type: "object",
+        required: ["owner", "repo", "author"],
+        properties: {
+          owner: { type: "string" },
+          repo: { type: "string" },
+          ref: { type: "string" },
+          author: { type: "string" },
+          chain: { type: "string" },
+          max_files: { type: "number", minimum: 1, maximum: 500 },
+          max_file_bytes: { type: "number", minimum: 1, maximum: MAX_FETCH_BYTES },
+          include: { type: "array", items: { type: "string" } },
+          exclude: { type: "array", items: { type: "string" } },
+          create_orientation: { type: "boolean" },
+          auto_link: { type: "boolean" },
+          set_head: { type: "boolean" },
+          lint: { type: "boolean" }
+        }
+      }
+    },
+    {
       name: "cairnstone_search",
       description: "Search compressed CairnStone refs before expanding raw content.",
       inputSchema: {

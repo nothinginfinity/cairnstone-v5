@@ -26,6 +26,10 @@ export async function createRepoStonesFromBody(body, env, deps) {
   const author = deps.requiredString(body.author, "author");
   const chain = body.chain || repo;
   const maxFiles = deps.clamp(Number(body.max_files || 200), 1, 500);
+  const repoFull = `${owner}/${repo}`;
+  const reuseUnchanged = body.reuse_unchanged !== false;
+  const linkSupersedes = body.link_supersedes !== false;
+  const priorIndex = await loadPriorRepoStoneIndex(env, { chain, repoFull });
 
   const treeResult = await fetchGitHubRepoTree({ owner, repo, ref }, env, deps);
   if (!treeResult.ok) return treeResult;
@@ -33,6 +37,9 @@ export async function createRepoStonesFromBody(body, env, deps) {
   const created = [];
   const skipped = [];
   const failed = [];
+  const reused = [];
+  const updated = [];
+  const superseded = [];
 
   const accepted = [];
   for (const file of treeResult.files) {
@@ -49,37 +56,29 @@ export async function createRepoStonesFromBody(body, env, deps) {
   }
 
   for (const file of candidates) {
-    const result = await deps.createStoneFromGitHubBody({
-      owner,
-      repo,
-      ref,
-      path: file.path,
-      author,
-      chain,
-      title: `${repo} ${file.path}`,
-      metadata: {
-        kind: "repo_file",
-        repo: `${owner}/${repo}`,
-        path: file.path,
-        sha: file.sha,
-        repo_stones_operation: true
-      }
-    }, env);
-
+  for (const file of candidates) {
+    const prior = priorIndex.by_path.get(file.path) || null;
+    if (reuseUnchanged && prior?.sha && prior.sha === file.sha) {
+      reused.push({ path: file.path, stone_hash: prior.stone_hash, refs: prior.refs, bytes: prior.bytes || file.size, sha: file.sha, reused_from: prior.stone_hash });
+      continue;
+    }
+    const result = await deps.createStoneFromGitHubBody({ owner, repo, ref, path: file.path, author, chain, title: `${repo} ${file.path}`, metadata: { kind:"repo_file", repo: repoFull, path:file.path, sha:file.sha, previous_sha: prior?.sha||null, previous_stone_hash: prior?.stone_hash||null, repo_stones_operation:true } }, env);
     if (result.ok) {
-      created.push({
-        path: file.path,
-        stone_hash: result.stone_hash,
-        refs: result.refs,
-        bytes: result.receipt?.original_bytes || file.size,
-        sha: file.sha
-      });
+      const item = { path:file.path, stone_hash:result.stone_hash, refs:result.refs, bytes:result.receipt?.original_bytes||file.size, sha:file.sha };
+      created.push(item);
+      if (prior?.stone_hash && prior.stone_hash !== result.stone_hash) {
+        updated.push({ ...item, previous_stone_hash: prior.stone_hash, previous_sha: prior.sha||null });
+        if (linkSupersedes) {
+          const edge = await deps.linkStonesFromBody({ from_hash: result.stone_hash, to_hash: prior.stone_hash, edge_type:"supersedes", note:`Repo file ${file.path} supersedes previous Git SHA ${prior.sha||"unknown"}` }, env);
+          if (edge.ok) superseded.push({ path:file.path, from_hash:result.stone_hash, to_hash:prior.stone_hash });
+        }
+      }
     } else {
-      failed.push({ path: file.path, size: file.size, sha: file.sha, error: result.error || "stone_failed" });
+      failed.push({ path:file.path, size:file.size, sha:file.sha, error:result.error||"stone_failed" });
     }
   }
-
-  const summary = { owner, repo, ref, chain, created, skipped, failed };
+  const current = [...created,...reused];
+  const summary = { owner, repo, ref, chain, created, reused, updated, skipped, failed };  const summary = { owner, repo, ref, chain, created, skipped, failed };
   let orientation = null;
 
   if (body.create_orientation !== false) {
@@ -90,7 +89,7 @@ export async function createRepoStonesFromBody(body, env, deps) {
       content: buildRepoOrientationContent(summary),
       metadata: {
         kind: "repo_orientation",
-        repo: `${owner}/${repo}`,
+
         ref,
         repo_stones_operation: true
       },
@@ -100,7 +99,7 @@ export async function createRepoStonesFromBody(body, env, deps) {
 
   let linked = 0;
   if (orientation?.ok && body.auto_link !== false) {
-    for (const item of created) {
+
       const edge = await deps.linkStonesFromBody({
         from_hash: orientation.stone_hash,
         to_hash: item.stone_hash,
@@ -117,16 +116,11 @@ export async function createRepoStonesFromBody(body, env, deps) {
     repo,
     ref,
     chain,
-    created_count: created.length,
-    skipped_count: skipped.length,
-    failed_count: failed.length,
-    linked_count: linked,
+
     orientation_hash: orientation?.stone_hash || null,
     head_hash: orientation?.stone_hash || null,
     truncated: treeResult.truncated,
-    created,
-    skipped,
-    failed
+
   };
 }
 

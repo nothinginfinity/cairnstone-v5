@@ -392,7 +392,20 @@ function mcpTools() {
   ];
 }
 
-async function createStoneFromGitHubBody(body, env) {
+    {
+      name: "cairnstone_get_chain_manifest",
+      description: "Get a navigational summary of an entire chain in one call: every stone's lod5, which one is HEAD, and every graph edge connecting them. Computed fresh from current data every time (never stale). Call this FIRST when picking up work on a chain you haven't seen recently, before listing or expanding individual stones.",
+      inputSchema: {
+        type: "object",
+        required: ["chain"],
+        properties: {
+          chain: { type: "string" }
+        }
+      }
+    }
+  ];
+}
+
 async function createRepoStonesFromBody(body, env) {
   return createRepoStonesRuntimeFromBody(body, env, {
     createStoneFromGitHubBody,
@@ -406,8 +419,8 @@ async function createRepoStonesFromBody(body, env) {
   });
 }
 
-async function createRepoStonesFromBody(body, env) {async function createStoneFromGitHubBody(body, env) {
-  const fetched = await fetchGitHubFileFromBody({ ...body, return_content: true }, env);  const fetched = await fetchGitHubFileFromBody({ ...body, return_content: true }, env);
+async function createStoneFromGitHubBody(body, env) {
+  const fetched = await fetchGitHubFileFromBody({ ...body, return_content: true }, env);
   if (!fetched.ok) return fetched;
   const title = body.title || `${fetched.github.owner}/${fetched.github.repo}/${fetched.github.path}@${fetched.github.ref}`;
   const stoneBody = {
@@ -427,7 +440,7 @@ async function createRepoStonesFromBody(body, env) {async function createStoneFr
   return createStoneFromBody(stoneBody, env);
 }
 
-async function createStoneFromBody(body, env) {
+async function createStoneFromBody(body, env) {async function createStoneFromBody(body, env) {
   const normalized = await normalizeStoneInput(body, env);
   requireBindings(env);
 

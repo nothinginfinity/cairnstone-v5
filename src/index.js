@@ -393,20 +393,8 @@ function mcpTools() {
 }
 
 async function createStoneFromGitHubBody(body, env) {
-async function createRepoStonesFromBody(body, env) {
-  return createRepoStonesRuntimeFromBody(body, env, {
-    createStoneFromGitHubBody,
-    createStoneFromBody,
-    linkStonesFromBody,
-    requireBindings,
-    requiredString,
-    safeGitHubPart,
-    safeGitHubRef,
-    clamp
-  });
-}
-
-  const fetched = await fetchGitHubFileFromBody({ ...body, return_content: true }, env);
+async function createRepoStonesFromBody(body, env) {async function createStoneFromGitHubBody(body, env) {
+  const fetched = await fetchGitHubFileFromBody({ ...body, return_content: true }, env);  const fetched = await fetchGitHubFileFromBody({ ...body, return_content: true }, env);
   if (!fetched.ok) return fetched;
   const title = body.title || `${fetched.github.owner}/${fetched.github.repo}/${fetched.github.path}@${fetched.github.ref}`;
   const stoneBody = {

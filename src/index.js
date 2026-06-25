@@ -393,17 +393,7 @@ function mcpTools() {
 }
 
     {
-      name: "cairnstone_get_chain_manifest",
-      description: "Get a navigational summary of an entire chain in one call: every stone's lod5, which one is HEAD, and every graph edge connecting them. Computed fresh from current data every time (never stale). Call this FIRST when picking up work on a chain you haven't seen recently, before listing or expanding individual stones.",
-      inputSchema: {
-        type: "object",
-        required: ["chain"],
-        properties: {
-          chain: { type: "string" }
-        }
-      }
-    }
-  ];
+      name: "cairnstone_get_chain_manifest",  ];
 }
 
 async function createRepoStonesFromBody(body, env) {
@@ -440,7 +430,7 @@ async function createStoneFromGitHubBody(body, env) {
   return createStoneFromBody(stoneBody, env);
 }
 
-async function createStoneFromBody(body, env) {async function createStoneFromBody(body, env) {
+async function createStoneFromBody(body, env) {async function createStoneFromBody(body, env) {async function createStoneFromBody(body, env) {
   const normalized = await normalizeStoneInput(body, env);
   requireBindings(env);
 

@@ -392,10 +392,6 @@ function mcpTools() {
   ];
 }
 
-    {
-      name: "cairnstone_get_chain_manifest",  ];
-}
-
 async function createRepoStonesFromBody(body, env) {
   return createRepoStonesRuntimeFromBody(body, env, {
     createStoneFromGitHubBody,
@@ -430,7 +426,7 @@ async function createStoneFromGitHubBody(body, env) {
   return createStoneFromBody(stoneBody, env);
 }
 
-async function createStoneFromBody(body, env) {async function createStoneFromBody(body, env) {async function createStoneFromBody(body, env) {
+async function createStoneFromBody(body, env) {
   const normalized = await normalizeStoneInput(body, env);
   requireBindings(env);
 

@@ -1,4 +1,5 @@
 import { parse as babelParse } from "@babel/parser";
+import { createRepoStonesFromBody as createRepoStonesRuntimeFromBody } from "./repo-stones-runtime.js";
 
 const VERSION = "0.3.0";
 const MCP_PROTOCOL_VERSION = "2025-03-26";

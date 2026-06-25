@@ -55,8 +55,7 @@ export async function createRepoStonesFromBody(body, env, deps) {
     skipped.push({ path: file.path, size: file.size, reason: "max_files_exceeded" });
   }
 
-  for (const file of candidates) {
-  for (const file of candidates) {
+
     const prior = priorIndex.by_path.get(file.path) || null;
     if (reuseUnchanged && prior?.sha && prior.sha === file.sha) {
       reused.push({ path: file.path, stone_hash: prior.stone_hash, refs: prior.refs, bytes: prior.bytes || file.size, sha: file.sha, reused_from: prior.stone_hash });
@@ -78,8 +77,7 @@ export async function createRepoStonesFromBody(body, env, deps) {
     }
   }
   const current = [...created,...reused];
-  const summary = { owner, repo, ref, chain, created, reused, updated, skipped, failed };  const summary = { owner, repo, ref, chain, created, skipped, failed };
-  let orientation = null;
+
 
   if (body.create_orientation !== false) {
     orientation = await deps.createStoneFromBody({
@@ -88,9 +86,7 @@ export async function createRepoStonesFromBody(body, env, deps) {
       chain,
       content: buildRepoOrientationContent(summary),
       metadata: {
-        kind: "repo_orientation",
 
-        ref,
         repo_stones_operation: true
       },
       set_as_head: body.set_head !== false
@@ -98,9 +94,18 @@ export async function createRepoStonesFromBody(body, env, deps) {
   }
 
   let linked = 0;
-  if (orientation?.ok && body.auto_link !== false) {
 
-      const edge = await deps.linkStonesFromBody({
+  const priorOrientationHash = priorIndex.previous_orientation?.stone_hash || priorIndex.previous_head_hash || null;
+  if (orientation?.ok && linkSupersedes && priorOrientationHash && priorOrientationHash !== orientation.stone_hash) {
+    const edge = await deps.linkStonesFromBody({
+      from_hash: orientation.stone_hash,
+      to_hash: priorOrientationHash,
+      edge_type: "supersedes",
+      note: `Repository orientation for ${repoFull}@${ref} supersedes previous orientation`
+    }, env);
+    if (edge.ok) orientationSuperseded = { from_hash: orientation.stone_hash, to_hash: priorOrientationHash, edge_id: edge.id };
+  }
+
         from_hash: orientation.stone_hash,
         to_hash: item.stone_hash,
         edge_type: "documents",
@@ -115,13 +120,7 @@ export async function createRepoStonesFromBody(body, env, deps) {
     owner,
     repo,
     ref,
-    chain,
 
-    orientation_hash: orientation?.stone_hash || null,
-    head_hash: orientation?.stone_hash || null,
-    truncated: treeResult.truncated,
-
-  };
 }
 
 async function loadPriorRepoStoneIndex(env, { chain, repoFull }) {

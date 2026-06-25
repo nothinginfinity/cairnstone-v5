@@ -130,6 +130,56 @@ export async function createRepoStonesFromBody(body, env, deps) {
   };
 }
 
+async function loadPriorRepoStoneIndex(env, { chain, repoFull }) {
+  const result = {
+    previous_head_hash: null,
+    previous_orientation: null,
+    by_path: new Map()
+  };
+
+  if (!env?.CAIRNSTONE_DB || !chain || !repoFull) return result;
+
+  const headRow = await env.CAIRNSTONE_DB.prepare("SELECT head_hash FROM chain_heads WHERE chain = ?").bind(chain).first();
+  result.previous_head_hash = headRow?.head_hash || null;
+
+  const rows = await env.CAIRNSTONE_DB.prepare(
+    "SELECT hash,created_at,stone_json FROM stones WHERE chain_hash = ? ORDER BY created_at ASC"
+  ).bind(chain).all();
+
+  for (const row of rows.results || []) {
+    let stone = null;
+    try {
+      stone = JSON.parse(row.stone_json || "null");
+    } catch {
+      continue;
+    }
+
+    const metadata = stone?.metadata || {};
+    if (metadata.repo !== repoFull || metadata.repo_stones_operation !== true) continue;
+
+    if (metadata.kind === "repo_orientation") {
+      result.previous_orientation = {
+        stone_hash: row.hash,
+        created_at: row.created_at,
+        ref: metadata.ref || null
+      };
+      continue;
+    }
+
+    if (metadata.kind !== "repo_file" || !metadata.path) continue;
+    result.by_path.set(metadata.path, {
+      stone_hash: row.hash,
+      created_at: row.created_at,
+      path: metadata.path,
+      sha: metadata.sha || null,
+      refs: stone?.layers?.lod2?.compressed_index?.length || null,
+      bytes: stone?.layers?.lod1?.raw_bytes || null
+    });
+  }
+
+  return result;
+}
+
 export async function fetchGitHubRepoTree(spec, env, deps = {}) {
   const safeGitHubPart = deps.safeGitHubPart || ((value) => String(value || "").trim());
   const safeGitHubRef = deps.safeGitHubRef || ((value) => String(value || "main").trim());

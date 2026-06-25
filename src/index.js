@@ -718,14 +718,7 @@ async function getChainManifest(env, chain) {
     "SELECT hash,title,author,created_at,stone_json FROM stones WHERE chain_hash = ? ORDER BY created_at ASC"
   ).bind(chain).all();
   const hashes = stoneRows.results.map(r => r.hash);
-  let edges = [];
-  if (hashes.length) {
-    const placeholders = hashes.map(() => "?").join(",");
-    const edgeRows = await env.CAIRNSTONE_DB.prepare(
-      `SELECT id,from_hash,to_hash,edge_type,note,created_at FROM stone_edges WHERE from_hash IN (${placeholders}) OR to_hash IN (${placeholders})`
-    ).bind(...hashes, ...hashes).all();
-    edges = edgeRows.results;
-  }
+  const edges = await queryEdgesByHashes(env, hashes);
   const nodes = stoneRows.results.map(row => {
     let stone = {};
     try { stone = JSON.parse(row.stone_json || "{}"); } catch {}
@@ -746,9 +739,35 @@ async function getChainManifest(env, chain) {
     head_hash: headRow ? headRow.head_hash : null,
     head_updated_at: headRow ? headRow.updated_at : null,
     stone_count: nodes.length,
+    edge_count: edges.length,
+    graph_complete: true,
     nodes,
     edges
   };
+}
+
+async function queryEdgesByHashes(env, hashes) {
+  if (!hashes.length) return [];
+  const edges = [];
+  const seen = new Set();
+  for (const batch of chunkArray(hashes, 40)) {
+    const placeholders = batch.map(() => "?").join(",");
+    const edgeRows = await env.CAIRNSTONE_DB.prepare(
+      `SELECT id,from_hash,to_hash,edge_type,note,created_at FROM stone_edges WHERE from_hash IN (${placeholders}) OR to_hash IN (${placeholders})`
+    ).bind(...batch, ...batch).all();
+    for (const edge of edgeRows.results || []) {
+      if (seen.has(edge.id)) continue;
+      seen.add(edge.id);
+      edges.push(edge);
+    }
+  }
+  return edges;
+}
+
+function chunkArray(items, size) {
+  const chunks = [];
+  for (let index = 0; index < items.length; index += size) chunks.push(items.slice(index, index + size));
+  return chunks;
 }
 
 function pluginsForLanguage(language) {

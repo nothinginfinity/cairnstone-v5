@@ -166,6 +166,7 @@ async function callMcpTool(name, args, env) {
   if (name === "cairnstone_fetch_github_file") return fetchGitHubFileFromBody(args, env);
   if (name === "cairnstone_create_stone") return createStoneFromBody(args, env);
   if (name === "cairnstone_create_github_file_stone") return createStoneFromGitHubBody(args, env);
+  if (name === "cairnstone_create_repo_stones") return createRepoStonesFromBody(args, env);
   if (name === "cairnstone_search") return searchStonesFromBody(args, env);
   if (name === "cairnstone_query_and_expand") return queryAndExpandFromBody(args, env);
   if (name === "cairnstone_expand") return expandRefFromBody(args, env);
@@ -392,6 +393,19 @@ function mcpTools() {
 }
 
 async function createStoneFromGitHubBody(body, env) {
+async function createRepoStonesFromBody(body, env) {
+  return createRepoStonesRuntimeFromBody(body, env, {
+    createStoneFromGitHubBody,
+    createStoneFromBody,
+    linkStonesFromBody,
+    requireBindings,
+    requiredString,
+    safeGitHubPart,
+    safeGitHubRef,
+    clamp
+  });
+}
+
   const fetched = await fetchGitHubFileFromBody({ ...body, return_content: true }, env);
   if (!fetched.ok) return fetched;
   const title = body.title || `${fetched.github.owner}/${fetched.github.repo}/${fetched.github.path}@${fetched.github.ref}`;

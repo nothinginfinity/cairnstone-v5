@@ -18,6 +18,7 @@ export default {
       if (request.method === "GET" && url.pathname === "/v1/stones") return json(await listStones(env, url));
       if (request.method === "POST" && url.pathname === "/v1/stones") return json(await createStoneFromBody(await request.json(), env));
       if (request.method === "POST" && url.pathname === "/v1/stones/github") return json(await createStoneFromGitHubBody(await request.json(), env));
+      if (request.method === "POST" && url.pathname === "/v1/stones/repository") return json(await createRepoStonesFromBody(await request.json(), env));
       if (request.method === "POST" && url.pathname === "/v1/fetch/github") return json(await fetchGitHubFileFromBody(await request.json(), env));
       if (request.method === "POST" && url.pathname === "/v1/search") return json(await searchStonesFromBody(await request.json(), env));
       if (request.method === "POST" && url.pathname === "/v1/query-expand") return json(await queryAndExpandFromBody(await request.json(), env));
@@ -78,6 +79,7 @@ function routes() {
     "POST /v1/stones",
     "GET /v1/stones",
     "POST /v1/stones/github",
+    "POST /v1/stones/repository",
     "POST /v1/fetch/github",
     "GET /v1/stones/:hash",
     "GET /v1/stones/:hash/lod/:level",

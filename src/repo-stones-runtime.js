@@ -103,7 +103,6 @@ export async function createRepoStonesFromBody(body, env, deps) {
   return { ok: true, owner, repo, ref, chain, previous_head_hash: priorIndex.previous_head_hash, previous_orientation_hash: priorIndex.previous_orientation?.stone_hash || null, created_count: created.length, reused_count: reused.length, updated_count: updated.length, superseded_count: superseded.length, skipped_count: skipped.length, failed_count: failed.length, linked_count: linked, orientation_hash: orientation?.stone_hash || null, orientation_superseded: orientationSuperseded, head_hash: orientation?.stone_hash || null, truncated: treeResult.truncated, created, reused, updated, superseded, skipped, failed };
 }
 
-(env, { chain, repoFull }) {
   const result = {
     previous_head_hash: null,
     previous_orientation: null,

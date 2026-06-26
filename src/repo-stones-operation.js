@@ -1,4 +1,4 @@
-export const REPO_STONES_OPERATION_VERSION = "0.2.0";
+export const REPO_STONES_OPERATION_VERSION = "0.2.1";
 
 // ---------------------------------------------------------------------------
 // Chain naming — preferred format: owner/repo
@@ -48,7 +48,7 @@ export const REPO_STONE_EXACT_NAMES = new Set([
   ".travis.yml", "tox.ini", ".flake8",
 ]);
 
-// Prefix patterns (lower-cased) for extensionless or variangt metadata files.
+// Prefix patterns (lower-cased) for extensionless or variant metadata files.
 export const REPO_STONE_NAME_PREFIXES = [
   "readme", "license", "licence", "contributing", "changelog",
   "authors", "notice", "copying", "security", "codeowners",
@@ -191,8 +191,10 @@ export function detectArchitecture(files) {
     /\/api\/|\broutes?\/|\bhandlers?\/|\bendpoints?\/|\bcontrollers?\/|\bviews?\//i.test(p)
   );
 
+  // FIX: was /\/workers?//i — the unescaped / terminated the regex early,
+  // leaving `i` as a dangling identifier that caused "i is not defined".
   const workerRoutes = paths.filter(p =>
-    /wrangler\.toml|worker\.js|worker\.ts|_worker\.js|\/workers?//i.test(p)
+    /wrangler\.toml|worker\.js|worker\.ts|_worker\.js|\/workers?\//i.test(p)
   );
 
   const cliFiles = paths.filter(p =>
@@ -253,7 +255,6 @@ export function buildLanguageBreakdown(files) {
 
 // ---------------------------------------------------------------------------
 // Lite lint analysis (pattern-based, no external AST for non-JS languages).
-// Returns only confirmed parser/syntax signals from content text.
 // ---------------------------------------------------------------------------
 export function liteLintAnalysis(path, content) {
   const ext = String(path || "").split(".").pop().toLowerCase();
@@ -261,17 +262,15 @@ export function liteLintAnalysis(path, content) {
   const lines = content.split(/\r?\n/);
 
   if (["py", "pyw"].includes(ext)) {
-    // Python: detect IndentationError signals and SyntaxError patterns
     const tabSpaceMix = lines.some(l => /^(\t+ | +\t)/.test(l));
     if (tabSpaceMix) errors.push({ kind: "confirmed", category: "syntax", message: "Mixed tabs and spaces detected (IndentationError in Python 3)", line: null });
-    lines.forEach((l, i) => {
-      if (/^\s*(def|class|if|else|elif|for|while|with|try|except|finally)\s+.*[^:]$/.test(l) && !/['"]/.test(l))
-        errors.push({ kind: "confirmed", category: "syntax", message: `Missing colon at end of compound statement`, line: i + 1 });
+    lines.forEach((line, idx) => {
+      if (/^\s*(def|class|if|else|elif|for|while|with|try|except|finally)\s+.*[^:]$/.test(line) && !/['"]/.test(line))
+        errors.push({ kind: "confirmed", category: "syntax", message: `Missing colon at end of compound statement`, line: idx + 1 });
     });
   }
 
   if (["go"].includes(ext)) {
-    // Go: detect unused imports pattern (simplified)
     const importBlock = content.match(/import\s*\([\s\S]*?\)/)?.[0] || "";
     const importedPkgs = [...importBlock.matchAll(/"([^"]+)"/g)].map(m => m[1].split("/").pop());
     for (const pkg of importedPkgs) {
@@ -283,9 +282,8 @@ export function liteLintAnalysis(path, content) {
   }
 
   if (["rs"].includes(ext)) {
-    // Rust: detect unwrap() calls (not errors but strong signals)
-    lines.forEach((l, i) => {
-      if (l.includes(".unwrap()")) errors.push({ kind: "suggestion", category: "reliability", message: "unwrap() call — consider using ? or expect()", line: i + 1 });
+    lines.forEach((line, idx) => {
+      if (line.includes(".unwrap()")) errors.push({ kind: "suggestion", category: "reliability", message: "unwrap() call — consider using ? or expect()", line: idx + 1 });
     });
   }
 
@@ -294,39 +292,35 @@ export function liteLintAnalysis(path, content) {
 
 // ---------------------------------------------------------------------------
 // Review analysis — static observations from file content.
-// Returns {confirmed, likely, suggestion} categorized observations.
 // ---------------------------------------------------------------------------
 export function reviewAnalysis(path, content) {
   const observations = [];
   const lines = content.split(/\r?\n/);
 
-  // Security
-  lines.forEach((l, i) => {
-    if (/(api[_-]?key|secret|password|token)\w*\s*[:=]\s*["'][^"']{4,}["']/i.test(l) && !/example|placeholder|your_/i.test(l))
-      observations.push({ kind: "confirmed", category: "security", message: "Possible hardcoded credential or secret", line: i + 1 });
-    if (/eval\s*\(|exec\s*\(/i.test(l))
-      observations.push({ kind: "likely", category: "security", message: "Dynamic code execution (eval/exec) detected", line: i + 1 });
-    if (/sql\s*=.*(%s|f["']|format|\+)/i.test(l))
-      observations.push({ kind: "likely", category: "security", message: "Possible SQL string interpolation (injection risk)", line: i + 1 });
+  lines.forEach((line, idx) => {
+    if (/(api[_-]?key|secret|password|token)\w*\s*[:=]\s*["'][^"']{4,}["']/i.test(line) && !/example|placeholder|your_/i.test(line))
+      observations.push({ kind: "confirmed", category: "security", message: "Possible hardcoded credential or secret", line: idx + 1 });
+    if (/eval\s*\(|exec\s*\(/i.test(line))
+      observations.push({ kind: "likely", category: "security", message: "Dynamic code execution (eval/exec) detected", line: idx + 1 });
+    if (/sql\s*=.*(%s|f["']|format|\+)/i.test(line))
+      observations.push({ kind: "likely", category: "security", message: "Possible SQL string interpolation (injection risk)", line: idx + 1 });
   });
 
-  // Performance
   const longFunctions = [];
   let funcStart = -1;
   let funcDepth = 0;
-  lines.forEach((l, i) => {
-    if (/^\s*(def |async def |function |const \w+ = (async )?\()/.test(l)) { funcStart = i; funcDepth = 0; }
-    funcDepth += (l.match(/\{/g) || []).length - (l.match(/\}/g) || []).length;
-    if (funcStart >= 0 && i - funcStart > 100)
-      longFunctions.push(i + 1);
+  lines.forEach((line, idx) => {
+    if (/^\s*(def |async def |function |const \w+ = (async )?\()/.test(line)) { funcStart = idx; funcDepth = 0; }
+    funcDepth += (line.match(/\{/g) || []).length - (line.match(/\}/g) || []).length;
+    if (funcStart >= 0 && idx - funcStart > 100)
+      longFunctions.push(idx + 1);
   });
   if (longFunctions.length)
     observations.push({ kind: "suggestion", category: "maintainability", message: `${longFunctions.length} function(s) exceed 100 lines — consider splitting`, line: longFunctions[0] });
 
-  // Maintainability
-  lines.forEach((l, i) => {
-    if (/\b(TODO|FIXME|HACK|XXX)\b/.test(l))
-      observations.push({ kind: "suggestion", category: "maintainability", message: `Unresolved annotation: ${l.trim().slice(0, 80)}`, line: i + 1 });
+  lines.forEach((line, idx) => {
+    if (/\b(TODO|FIXME|HACK|XXX)\b/.test(line))
+      observations.push({ kind: "suggestion", category: "maintainability", message: `Unresolved annotation: ${line.trim().slice(0, 80)}`, line: idx + 1 });
   });
 
   const MAGIC_RE = /[^=!<>]\b(\d{3,})\b[^:"']/g;
@@ -334,7 +328,6 @@ export function reviewAnalysis(path, content) {
     observations.push({ kind: "suggestion", category: "maintainability", message: `Magic number ${m[1]} — consider named constant`, line: null });
   });
 
-  // Architecture
   const ext = String(path || "").split(".").pop().toLowerCase();
   if (["py", "js", "ts"].includes(ext)) {
     const lineCount = lines.length;
@@ -346,7 +339,7 @@ export function reviewAnalysis(path, content) {
 }
 
 // ---------------------------------------------------------------------------
-// Orientation stone content builder (enhanced with fingerprint + arch + stats).
+// Orientation stone content builder.
 // ---------------------------------------------------------------------------
 export function buildRepoOrientationContent(summary) {
   const created = Array.isArray(summary.created) ? summary.created : [];
@@ -369,7 +362,7 @@ export function buildRepoOrientationContent(summary) {
 
   if (langBreakdown.length) {
     lines.push("## Language Breakdown");
-    for (const l of langBreakdown) lines.push(`- ${l.lang}: ${l.count} files (${l.pct}%)`);
+    for (const lb of langBreakdown) lines.push(`- ${lb.lang}: ${lb.count} files (${lb.pct}%)`);
     lines.push("");
   }
 
@@ -381,22 +374,22 @@ export function buildRepoOrientationContent(summary) {
     }
     if (arch.packageManagers && arch.packageManagers.length) {
       lines.push("## Package Managers");
-      for (const p of arch.packageManagers) lines.push(`- ${p}`);
+      for (const pm of arch.packageManagers) lines.push(`- ${pm}`);
       lines.push("");
     }
     if (arch.entryPoints && arch.entryPoints.length) {
       lines.push("## Detected Entry Points");
-      for (const e of arch.entryPoints) lines.push(`- ${e}`);
+      for (const ep of arch.entryPoints) lines.push(`- ${ep}`);
       lines.push("");
     }
     if (arch.importantFolders && arch.importantFolders.length) {
       lines.push("## Important Folders");
-      for (const f of arch.importantFolders) lines.push(`- ${f}/`);
+      for (const folder of arch.importantFolders) lines.push(`- ${folder}/`);
       lines.push("");
     }
     if (arch.configs && arch.configs.length) {
       lines.push("## Important Configuration Files");
-      for (const c of arch.configs.slice(0, 20)) lines.push(`- ${c}`);
+      for (const cfg of arch.configs.slice(0, 20)) lines.push(`- ${cfg}`);
       lines.push("");
     }
   }
@@ -485,7 +478,7 @@ export function buildArchitectureContent(summary, arch) {
 
   if (arch.packageManagers.length) {
     lines.push("## Package / Dependency Managers");
-    for (const p of arch.packageManagers) lines.push(`- ${p}`);
+    for (const pm of arch.packageManagers) lines.push(`- ${pm}`);
     lines.push("");
   }
 
@@ -503,7 +496,7 @@ export function buildArchitectureContent(summary, arch) {
 
   if (arch.importantFolders.length) {
     lines.push("## Package Layout (Top-Level Folders)");
-    for (const f of arch.importantFolders) lines.push(`- ${f}/`);
+    for (const folder of arch.importantFolders) lines.push(`- ${folder}/`);
     lines.push("");
   }
 

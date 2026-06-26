@@ -30,6 +30,22 @@ export default {
       const lodMatch = url.pathname.match(/^\/v1\/stones\/([^/]+)\/lod\/(lod[1-5])$/);
       if (request.method === "GET" && lodMatch) return json(await getLod(env, lodMatch[1], lodMatch[2]));
 
+      // REST compatibility shims — used by CairnGraph and other REST consumers.
+      // These call the same internal functions as the MCP tools; no new logic.
+      const chainManifestMatch = url.pathname.match(/^\/chains\/([^/]+)\/manifest$/);
+      if (request.method === "GET" && chainManifestMatch) {
+        const chain = decodeURIComponent(chainManifestMatch[1]);
+        if (!chain) return json({ ok: false, error: "missing_chain", route: "/chains/:chain/manifest" }, 400);
+        return json(await getChainManifest(env, chain));
+      }
+
+      const restStoneMatch = url.pathname.match(/^\/stones\/([^/]+)$/);
+      if (request.method === "GET" && restStoneMatch) {
+        const hash = decodeURIComponent(restStoneMatch[1]);
+        if (!hash) return json({ ok: false, error: "missing_hash", route: "/stones/:hash" }, 400);
+        return json(await getStone(env, hash));
+      }
+
       return json({ ok: false, error: "not_found", endpoints: routes() }, 404);
     } catch (error) {
       return json({ ok: false, error: String(error && error.message ? error.message : error) }, 500);
@@ -85,7 +101,9 @@ function routes() {
     "GET /v1/stones/:hash/lod/:level",
     "POST /v1/search",
     "POST /v1/query-expand",
-    "POST /v1/expand"
+    "POST /v1/expand",
+    "GET /chains/:chain/manifest",
+    "GET /stones/:hash"
   ];
 }
 

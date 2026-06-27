@@ -32,7 +32,7 @@ export default {
 
       // REST compatibility shims — used by CairnGraph and other REST consumers.
       // These call the same internal functions as the MCP tools; no new logic.
-      const chainManifestMatch = url.pathname.match(/^\/chains\/([^/]+)\/manifest$/);
+      const chainManifestMatch = url.pathname.match(/^\/chains\/([^]+)\/manifest$/);
       if (request.method === "GET" && chainManifestMatch) {
         const chain = decodeURIComponent(chainManifestMatch[1]);
         if (!chain) return json({ ok: false, error: "missing_chain", route: "/chains/:chain/manifest" }, 400);

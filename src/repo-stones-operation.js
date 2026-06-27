@@ -1,4 +1,4 @@
-export const REPO_STONES_OPERATION_VERSION = "0.2.2";
+export const REPO_STONES_OPERATION_VERSION = "0.2.3";
 
 export function canonicalChain(owner, repo, override) {
   if (typeof override === "string" && override.trim()) return override.trim();
@@ -176,7 +176,7 @@ export function detectArchitecture(files = []) {
     ].includes(b);
   });
   const apiFiles = paths.filter((p) => /\/api\/|\/routes?\/|\/handlers?\/|\/endpoints?\/|\/controllers?\/|\/views?\//i.test(p));
-  const workerRoutes = paths.filter((p) => /wrangler\.toml|worker\.js|worker\.ts|_worker\.js|\/workers?\/|workers?\\/i.test(p));
+  const workerRoutes = paths.filter((p) => /wrangler\.toml|worker\.js|worker\.ts|_worker\.js|\/workers?\/|workers?\\\//i.test(p));
   const cliFiles = paths.filter((p) => /cli\.js|cli\.ts|bin\/|scripts\/|cmd\//i.test(p));
   const configFiles = paths.filter((p) => /package\.json|wrangler\.toml|tsconfig\.json|vite\.config|next\.config|pyproject\.toml|cargo\.toml|go\.mod|dockerfile/i.test(p));
   const langSet = new Set(files.map((f) => detectLanguageFromPath(f.path)).filter(Boolean));
